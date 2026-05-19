@@ -27,6 +27,7 @@ serde = { workspace = true, optional = true }
 smol_str.workspace = true
 tracing.workspace = true
 winit-core.workspace = true
+mime.workspace = true
 
 # Platform-specific
 calloop.workspace = true

@@ -2,7 +2,6 @@
 use std::cell::LazyCell;
 use std::cmp::Ordering;
 use std::f64;
-use std::path::PathBuf;
 use std::sync::{Mutex, Weak};
 
 use dpi::{PhysicalPosition, PhysicalSize};
@@ -11,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use crate::Instant;
+use crate::data_transfer::DataTransfer;
 use crate::error::RequestError;
 use crate::event_loop::AsyncRequestSerial;
 use crate::keyboard::{self, ModifiersKeyState, ModifiersKeys, ModifiersState};
@@ -77,8 +77,8 @@ pub enum WindowEvent {
 
     /// A file drag operation has entered the window.
     DragEntered {
-        /// List of paths that are being dragged onto the window.
-        paths: Vec<PathBuf>,
+        /// Data transfer object specifying the ID and available types.
+        data: DataTransfer,
         /// (x,y) coordinates in pixels relative to the top-left corner of the window. May be
         /// negative on some platforms if something is dragged over a window's decorations (title
         /// bar, frame, etc).
@@ -86,6 +86,8 @@ pub enum WindowEvent {
     },
     /// A file drag operation has moved over the window.
     DragMoved {
+        /// Data transfer object specifying the ID and available types.
+        data: DataTransfer,
         /// (x,y) coordinates in pixels relative to the top-left corner of the window. May be
         /// negative on some platforms if something is dragged over a window's decorations (title
         /// bar, frame, etc).
@@ -93,8 +95,8 @@ pub enum WindowEvent {
     },
     /// The file drag operation has dropped file(s) on the window.
     DragDropped {
-        /// List of paths that are being dragged onto the window.
-        paths: Vec<PathBuf>,
+        /// Data transfer object specifying the ID and available types.
+        data: DataTransfer,
         /// (x,y) coordinates in pixels relative to the top-left corner of the window. May be
         /// negative on some platforms if something is dragged over a window's decorations (title
         /// bar, frame, etc).
@@ -102,6 +104,8 @@ pub enum WindowEvent {
     },
     /// The file drag operation has been cancelled or left the window.
     DragLeft {
+        /// Data transfer object specifying the ID and available types.
+        data: DataTransfer,
         /// (x,y) coordinates in pixels relative to the top-left corner of the window. May be
         /// negative on some platforms if something is dragged over a window's decorations (title
         /// bar, frame, etc).
@@ -1560,16 +1564,19 @@ mod tests {
             use crate::event::Ime::Enabled;
             use crate::event::WindowEvent::*;
             use crate::event::{PointerKind, PointerSource};
+            use crate::data_transfer::{DataTransfer, DataTransferId};
+
+            let data_transfer = DataTransfer::from_paths(DataTransferId::from_raw(0), vec![PathBuf::new("x.txt")]);
 
             with_window_event(CloseRequested);
             with_window_event(Destroyed);
             with_window_event(Focused(true));
             with_window_event(Moved((0, 0).into()));
             with_window_event(SurfaceResized((0, 0).into()));
-            with_window_event(DragEntered { paths: vec!["x.txt".into()], position: (0, 0).into() });
-            with_window_event(DragMoved { position: (0, 0).into() });
-            with_window_event(DragDropped { paths: vec!["x.txt".into()], position: (0, 0).into() });
-            with_window_event(DragLeft { position: Some((0, 0).into()) });
+            with_window_event(DragEntered { data: data_transfer.clone(), position: (0, 0).into() });
+            with_window_event(DragMoved { data: data_transfer.clone(), position: (0, 0).into() });
+            with_window_event(DragDropped { data: data_transfer.clone(), position: (0, 0).into() });
+            with_window_event(DragLeft { data: data_transfer.clone(), position: Some((0, 0).into()) });
             with_window_event(Ime(Enabled));
             with_window_event(PointerMoved {
                 device_id: None,
@@ -1663,24 +1670,24 @@ mod tests {
         const TILT_TO_ANGLE: &[(TabletToolTilt, TabletToolAngle)] = &[
             (TabletToolTilt { x: 0, y: 0 }, TabletToolAngle { altitude: FRAC_PI_2, azimuth: 0. }),
             (TabletToolTilt { x: 0, y: 90 }, TabletToolAngle { altitude: 0., azimuth: FRAC_PI_2 }),
-            (TabletToolTilt { x: 0, y: -90 }, TabletToolAngle {
-                altitude: 0.,
-                azimuth: 3. * FRAC_PI_2,
-            }),
+            (
+                TabletToolTilt { x: 0, y: -90 },
+                TabletToolAngle { altitude: 0., azimuth: 3. * FRAC_PI_2 },
+            ),
             (TabletToolTilt { x: 90, y: 0 }, TabletToolAngle { altitude: 0., azimuth: 0. }),
             (TabletToolTilt { x: 90, y: 90 }, TabletToolAngle { altitude: 0., azimuth: 0. }),
             (TabletToolTilt { x: 90, y: -90 }, TabletToolAngle { altitude: 0., azimuth: 0. }),
             (TabletToolTilt { x: -90, y: 0 }, TabletToolAngle { altitude: 0., azimuth: PI }),
             (TabletToolTilt { x: -90, y: 90 }, TabletToolAngle { altitude: 0., azimuth: 0. }),
             (TabletToolTilt { x: -90, y: -90 }, TabletToolAngle { altitude: 0., azimuth: 0. }),
-            (TabletToolTilt { x: 0, y: 45 }, TabletToolAngle {
-                altitude: FRAC_PI_4,
-                azimuth: FRAC_PI_2,
-            }),
-            (TabletToolTilt { x: 0, y: -45 }, TabletToolAngle {
-                altitude: FRAC_PI_4,
-                azimuth: 3. * FRAC_PI_2,
-            }),
+            (
+                TabletToolTilt { x: 0, y: 45 },
+                TabletToolAngle { altitude: FRAC_PI_4, azimuth: FRAC_PI_2 },
+            ),
+            (
+                TabletToolTilt { x: 0, y: -45 },
+                TabletToolAngle { altitude: FRAC_PI_4, azimuth: 3. * FRAC_PI_2 },
+            ),
             (TabletToolTilt { x: 45, y: 0 }, TabletToolAngle { altitude: FRAC_PI_4, azimuth: 0. }),
             (TabletToolTilt { x: -45, y: 0 }, TabletToolAngle { altitude: FRAC_PI_4, azimuth: PI }),
         ];
@@ -1695,20 +1702,20 @@ mod tests {
             (TabletToolAngle { altitude: FRAC_PI_4, azimuth: 0. }, TabletToolTilt { x: 45, y: 0 }),
             (TabletToolAngle { altitude: FRAC_PI_2, azimuth: 0. }, TabletToolTilt { x: 0, y: 0 }),
             (TabletToolAngle { altitude: 0., azimuth: FRAC_PI_2 }, TabletToolTilt { x: 0, y: 90 }),
-            (TabletToolAngle { altitude: FRAC_PI_4, azimuth: FRAC_PI_2 }, TabletToolTilt {
-                x: 0,
-                y: 45,
-            }),
+            (
+                TabletToolAngle { altitude: FRAC_PI_4, azimuth: FRAC_PI_2 },
+                TabletToolTilt { x: 0, y: 45 },
+            ),
             (TabletToolAngle { altitude: 0., azimuth: PI }, TabletToolTilt { x: -90, y: 0 }),
             (TabletToolAngle { altitude: FRAC_PI_4, azimuth: PI }, TabletToolTilt { x: -45, y: 0 }),
-            (TabletToolAngle { altitude: 0., azimuth: 3. * FRAC_PI_2 }, TabletToolTilt {
-                x: 0,
-                y: -90,
-            }),
-            (TabletToolAngle { altitude: FRAC_PI_4, azimuth: 3. * FRAC_PI_2 }, TabletToolTilt {
-                x: 0,
-                y: -45,
-            }),
+            (
+                TabletToolAngle { altitude: 0., azimuth: 3. * FRAC_PI_2 },
+                TabletToolTilt { x: 0, y: -90 },
+            ),
+            (
+                TabletToolAngle { altitude: FRAC_PI_4, azimuth: 3. * FRAC_PI_2 },
+                TabletToolTilt { x: 0, y: -45 },
+            ),
         ];
 
         for (angle, tilt) in ANGLE_TO_TILT {

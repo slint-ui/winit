@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use foldhash::HashMap;
+use sctk::data_device_manager::data_device::DataDevice;
 use sctk::reexports::client::backend::ObjectId;
 use sctk::reexports::client::protocol::wl_seat::WlSeat;
 use sctk::reexports::client::protocol::wl_touch::WlTouch;
@@ -19,6 +20,7 @@ use winit_core::keyboard::ModifiersState;
 
 use crate::state::WinitState;
 
+mod dnd;
 mod keyboard;
 mod pointer;
 mod text_input;
@@ -59,6 +61,9 @@ pub struct WinitSeatState {
 
     /// The pinch pointer gesture bound on the seat.
     pointer_gesture_pinch: Option<ZwpPointerGesturePinchV1>,
+
+    /// The drag-and-drop state
+    data_device: Option<DataDevice>,
 
     /// The keyboard bound on the seat.
     keyboard_state: Option<KeyboardState>,
@@ -124,6 +129,11 @@ impl SeatHandler for WinitState {
                         pointer_data,
                     )
                     .expect("failed to create pointer with present capability.");
+
+                seat_state.data_device = self
+                    .data_device_manager_state
+                    .as_ref()
+                    .map(|device| device.get_data_device(queue_handle, &seat));
 
                 seat_state.relative_pointer = self.relative_pointer.as_ref().map(|manager| {
                     manager.get_relative_pointer(
@@ -208,6 +218,8 @@ impl SeatHandler for WinitState {
                 if let Some(pointer_gesture_pinch) = seat_state.pointer_gesture_pinch.take() {
                     pointer_gesture_pinch.destroy();
                 }
+
+                seat_state.data_device = None;
 
                 if let Some(pointer) = seat_state.pointer.take() {
                     let pointer_data = pointer.pointer().winit_data();

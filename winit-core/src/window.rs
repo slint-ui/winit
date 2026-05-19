@@ -1,5 +1,5 @@
 //! The [`Window`] trait and associated types.
-use std::fmt;
+use std::fmt::{self, Display};
 
 use bitflags::bitflags;
 use cursor_icon::CursorIcon;
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::as_any::AsAny;
 use crate::cursor::Cursor;
+use crate::data_transfer::DataTransferId;
 use crate::error::RequestError;
 use crate::icon::Icon;
 use crate::monitor::{Fullscreen, MonitorHandle};
@@ -42,7 +43,8 @@ impl WindowId {
 
 impl fmt::Debug for WindowId {
     fn fmt(&self, fmtr: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(fmtr)
+        let inner = self.0;
+        write!(fmtr, "{inner:?}")
     }
 }
 
@@ -456,6 +458,17 @@ pub trait PlatformWindowAttributes: AsAny + std::fmt::Debug + Send + Sync {
 }
 
 impl_dyn_casting!(PlatformWindowAttributes);
+
+/// An operation was attempted on a data transfer ID, but that ID was invalid.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct UnknownDataTransfer(DataTransferId);
+
+impl Display for UnknownDataTransfer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = self.0.into_raw();
+        write!(f, "Unknown data transfer with ID {id}")
+    }
+}
 
 /// Represents a window.
 ///
@@ -1166,6 +1179,40 @@ pub trait Window: AsAny + Send + Sync + fmt::Debug {
                 ..ImeRequestData::default()
             }));
         }
+    }
+
+    /// Mark a given data transfer ID as being accepted by the window.
+    ///
+    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data can be dropped.
+    ///
+    /// Note that on some platforms (e.g. Wayland), accepting a data transfer requires specifying
+    /// one or more accepted types. Using this method will mark all available types as accepted.
+    /// For the most reliable cross-platform behaviour, [`accept_drag_type`](Window::accept_drag_type)
+    /// is preferred, although in most cases simply conditionally accepting the data transfer
+    /// based on whether or not it advertises a supported type will do the right thing.
+    fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
+        Err(UnknownDataTransfer(id))
+    }
+
+    /// Mark a single type of a given data transfer ID as being accepted by the window.
+    ///
+    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data can be dropped.
+    ///
+    /// If the window may accept more than one of the advertised types, this method should be
+    /// called multiple times, once for each of the accepted types.
+    fn accept_drag_type(&self, id: DataTransferId, type_: &str) -> Result<(), UnknownDataTransfer> {
+        let _ = type_;
+        self.accept_drag(id)
+    }
+
+    /// Mark a given data transfer ID as being rejected by the window.
+    ///
+    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data can _not_ be dropped.
+    ///
+    /// This will ensure that the OS/compositor indicates to the user that dropping the dragged data
+    /// is not possible.
+    fn reject_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
+        Err(UnknownDataTransfer(id))
     }
 
     /// Atomically apply request to IME.

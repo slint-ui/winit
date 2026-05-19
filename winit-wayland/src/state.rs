@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use foldhash::HashMap;
 use sctk::compositor::{CompositorHandler, CompositorState};
+use sctk::data_device_manager::DataDeviceManagerState;
 use sctk::output::{OutputHandler, OutputState};
 use sctk::reexports::calloop::LoopHandle;
 use sctk::reexports::client::backend::ObjectId;
@@ -113,6 +114,9 @@ pub struct WinitState {
     /// Viewporter state on the given window.
     pub viewporter_state: Option<ViewporterState>,
 
+    /// Data device manager state on the given window.
+    pub data_device_manager_state: Option<DataDeviceManagerState>,
+
     /// Fractional scaling manager.
     pub fractional_scaling_manager: Option<FractionalScalingManager>,
 
@@ -168,6 +172,16 @@ impl WinitState {
                 (None, None)
             };
 
+        let data_device_manager_state = match DataDeviceManagerState::bind(globals, queue_handle) {
+            Ok(state) => Some(state),
+            Err(e) => {
+                tracing::warn!(
+                    "Data device manager not available, clipboard and drag-and-drop disabled: {e:?}"
+                );
+                None
+            },
+        };
+
         let shm = Shm::bind(globals, queue_handle).map_err(|err| os_error!(err))?;
         let image_pool = Arc::new(Mutex::new(SlotPool::new(2, &shm).unwrap()));
 
@@ -191,6 +205,7 @@ impl WinitState {
             window_compositor_updates: Vec::new(),
             window_events_sink: Default::default(),
             viewporter_state,
+            data_device_manager_state,
             fractional_scaling_manager,
             blur_manager: BgrEffectManager::new(globals, queue_handle).ok(),
 
@@ -452,3 +467,4 @@ sctk::delegate_registry!(WinitState);
 sctk::delegate_shm!(WinitState);
 sctk::delegate_xdg_shell!(WinitState);
 sctk::delegate_xdg_window!(WinitState);
+sctk::delegate_data_device!(WinitState);
