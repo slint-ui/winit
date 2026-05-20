@@ -1,12 +1,10 @@
-use std::{
-    collections::BTreeSet,
-    fmt::Debug,
-    hash::Hash,
-    io::{self, BufRead},
-    path::PathBuf,
-    str::FromStr,
-    sync::Arc,
-};
+use std::collections::BTreeSet;
+use std::fmt::Debug;
+use std::hash::Hash;
+use std::io::{self, BufRead};
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::Arc;
 
 /// Identifier of a data transfer.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

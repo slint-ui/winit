@@ -1183,20 +1183,23 @@ pub trait Window: AsAny + Send + Sync + fmt::Debug {
 
     /// Mark a given data transfer ID as being accepted by the window.
     ///
-    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data can be dropped.
+    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data
+    /// can be dropped.
     ///
     /// Note that on some platforms (e.g. Wayland), accepting a data transfer requires specifying
     /// one or more accepted types. Using this method will mark all available types as accepted.
-    /// For the most reliable cross-platform behaviour, [`accept_drag_type`](Window::accept_drag_type)
-    /// is preferred, although in most cases simply conditionally accepting the data transfer
-    /// based on whether or not it advertises a supported type will do the right thing.
+    /// For the most reliable cross-platform behaviour,
+    /// [`accept_drag_type`](Window::accept_drag_type) is preferred, although in most cases
+    /// simply conditionally accepting the data transfer based on whether or not it advertises a
+    /// supported type will do the right thing.
     fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
         Err(UnknownDataTransfer(id))
     }
 
     /// Mark a single type of a given data transfer ID as being accepted by the window.
     ///
-    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data can be dropped.
+    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data
+    /// can be dropped.
     ///
     /// If the window may accept more than one of the advertised types, this method should be
     /// called multiple times, once for each of the accepted types.
@@ -1207,7 +1210,8 @@ pub trait Window: AsAny + Send + Sync + fmt::Debug {
 
     /// Mark a given data transfer ID as being rejected by the window.
     ///
-    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data can _not_ be dropped.
+    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data
+    /// can _not_ be dropped.
     ///
     /// This will ensure that the OS/compositor indicates to the user that dropping the dragged data
     /// is not possible.

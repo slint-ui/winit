@@ -176,7 +176,8 @@ impl WinitState {
             Ok(state) => Some(state),
             Err(e) => {
                 tracing::warn!(
-                    "Data device manager not available, clipboard and drag-and-drop disabled: {e:?}"
+                    "Data device manager not available, clipboard and drag-and-drop disabled: \
+                     {e:?}"
                 );
                 None
             },

@@ -1,10 +1,9 @@
-use sctk::data_device_manager::{
-    data_device::DataDeviceHandler, data_offer::DataOfferHandler, data_source::DataSourceHandler,
-};
-use wayland_client::{
-    Connection, QueueHandle,
-    protocol::{wl_data_device::WlDataDevice, wl_surface::WlSurface},
-};
+use sctk::data_device_manager::data_device::DataDeviceHandler;
+use sctk::data_device_manager::data_offer::DataOfferHandler;
+use sctk::data_device_manager::data_source::DataSourceHandler;
+use wayland_client::protocol::wl_data_device::WlDataDevice;
+use wayland_client::protocol::wl_surface::WlSurface;
+use wayland_client::{Connection, QueueHandle};
 
 use crate::state::WinitState;
 
