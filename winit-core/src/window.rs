@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::as_any::AsAny;
 use crate::cursor::Cursor;
-use crate::data_transfer::DataTransferId;
+use crate::data_transfer::{DataTransfer, DataTransferId, TransferType};
 use crate::error::RequestError;
 use crate::icon::Icon;
 use crate::monitor::{Fullscreen, MonitorHandle};
@@ -461,7 +461,7 @@ impl_dyn_casting!(PlatformWindowAttributes);
 
 /// An operation was attempted on a data transfer ID, but that ID was invalid.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct UnknownDataTransfer(DataTransferId);
+pub struct UnknownDataTransfer(pub DataTransferId);
 
 impl Display for UnknownDataTransfer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1181,6 +1181,32 @@ pub trait Window: AsAny + Send + Sync + fmt::Debug {
         }
     }
 
+    /// Get a [data transfer](DataTransfer) by its ID.
+    ///
+    /// If the ID is invalid (e.g. if the lifetime of the data transfer has expired), this will
+    /// return an error.
+    fn data_transfer(
+        &self,
+        id: DataTransferId,
+    ) -> Result<Box<dyn DataTransfer + '_>, UnknownDataTransfer> {
+        Err(UnknownDataTransfer(id))
+    }
+
+    /// Request to fetch a type from a [data transfer](DataTransfer).
+    ///
+    /// The data will be supplied via [`WindowEvent::DataTransferResult`].
+    ///
+    /// If the ID is invalid (e.g. if the lifetime of the data transfer has expired), this will
+    /// return an error.
+    fn fetch_data_transfer(
+        &self,
+        id: DataTransferId,
+        type_: &dyn TransferType,
+    ) -> Result<(), UnknownDataTransfer> {
+        let _ = type_;
+        Err(UnknownDataTransfer(id))
+    }
+
     /// Mark a given data transfer ID as being accepted by the window.
     ///
     /// This allows the OS/compositor to display the correct UI, indicating that the dragged data
@@ -1203,7 +1229,11 @@ pub trait Window: AsAny + Send + Sync + fmt::Debug {
     ///
     /// If the window may accept more than one of the advertised types, this method should be
     /// called multiple times, once for each of the accepted types.
-    fn accept_drag_type(&self, id: DataTransferId, type_: &str) -> Result<(), UnknownDataTransfer> {
+    fn accept_drag_type(
+        &self,
+        id: DataTransferId,
+        type_: &dyn TransferType,
+    ) -> Result<(), UnknownDataTransfer> {
         let _ = type_;
         self.accept_drag(id)
     }

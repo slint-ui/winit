@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use crate::Instant;
-use crate::data_transfer::DataTransfer;
+use crate::data_transfer::{DataTransferId, DynTypedData};
 use crate::error::RequestError;
 use crate::event_loop::AsyncRequestSerial;
 use crate::keyboard::{self, ModifiersKeyState, ModifiersKeys, ModifiersState};
@@ -46,7 +46,10 @@ pub enum StartCause {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowEvent {
     /// The activation token was delivered back and now could be used.
-    ActivationTokenDone { serial: AsyncRequestSerial, token: ActivationToken },
+    ActivationTokenDone {
+        serial: AsyncRequestSerial,
+        token: ActivationToken,
+    },
 
     /// The size of the window's surface has changed.
     ///
@@ -78,7 +81,7 @@ pub enum WindowEvent {
     /// A file drag operation has entered the window.
     DragEntered {
         /// Data transfer object specifying the ID and available types.
-        data: DataTransfer,
+        id: DataTransferId,
         /// (x,y) coordinates in pixels relative to the top-left corner of the window. May be
         /// negative on some platforms if something is dragged over a window's decorations (title
         /// bar, frame, etc).
@@ -87,7 +90,7 @@ pub enum WindowEvent {
     /// A file drag operation has moved over the window.
     DragMoved {
         /// Data transfer object specifying the ID and available types.
-        data: DataTransfer,
+        id: DataTransferId,
         /// (x,y) coordinates in pixels relative to the top-left corner of the window. May be
         /// negative on some platforms if something is dragged over a window's decorations (title
         /// bar, frame, etc).
@@ -96,7 +99,7 @@ pub enum WindowEvent {
     /// The file drag operation has dropped file(s) on the window.
     DragDropped {
         /// Data transfer object specifying the ID and available types.
-        data: DataTransfer,
+        id: DataTransferId,
         /// (x,y) coordinates in pixels relative to the top-left corner of the window. May be
         /// negative on some platforms if something is dragged over a window's decorations (title
         /// bar, frame, etc).
@@ -105,7 +108,7 @@ pub enum WindowEvent {
     /// The file drag operation has been cancelled or left the window.
     DragLeft {
         /// Data transfer object specifying the ID and available types.
-        data: DataTransfer,
+        id: DataTransferId,
         /// (x,y) coordinates in pixels relative to the top-left corner of the window. May be
         /// negative on some platforms if something is dragged over a window's decorations (title
         /// bar, frame, etc).
@@ -114,6 +117,11 @@ pub enum WindowEvent {
         ///
         /// - **Windows:** Always emits [`None`].
         position: Option<PhysicalPosition<f64>>,
+    },
+
+    DataTransferResult {
+        id: DataTransferId,
+        data: DynTypedData,
     },
 
     /// The window gained or lost focus.
@@ -245,7 +253,11 @@ pub enum WindowEvent {
     },
 
     /// A mouse wheel movement or touchpad scroll occurred.
-    MouseWheel { device_id: Option<DeviceId>, delta: MouseScrollDelta, phase: TouchPhase },
+    MouseWheel {
+        device_id: Option<DeviceId>,
+        delta: MouseScrollDelta,
+        phase: TouchPhase,
+    },
 
     /// An mouse button press has been received.
     PointerButton {
@@ -320,7 +332,9 @@ pub enum WindowEvent {
     ///
     /// - Only available on **macOS 10.8** and later, and **iOS**.
     /// - On iOS, not recognized by default. It must be enabled when needed.
-    DoubleTapGesture { device_id: Option<DeviceId> },
+    DoubleTapGesture {
+        device_id: Option<DeviceId>,
+    },
 
     /// Two-finger rotation gesture.
     ///
@@ -1564,19 +1578,19 @@ mod tests {
             use crate::event::Ime::Enabled;
             use crate::event::WindowEvent::*;
             use crate::event::{PointerKind, PointerSource};
-            use crate::data_transfer::{DataTransfer, DataTransferId};
+            use crate::data_transfer::DataTransferId;
 
-            let data_transfer = DataTransfer::from_paths(DataTransferId::from_raw(0), vec![PathBuf::new("x.txt")]);
+            let dnd_data = DataTransferId::from_raw(123);
 
             with_window_event(CloseRequested);
             with_window_event(Destroyed);
             with_window_event(Focused(true));
             with_window_event(Moved((0, 0).into()));
             with_window_event(SurfaceResized((0, 0).into()));
-            with_window_event(DragEntered { data: data_transfer.clone(), position: (0, 0).into() });
-            with_window_event(DragMoved { data: data_transfer.clone(), position: (0, 0).into() });
-            with_window_event(DragDropped { data: data_transfer.clone(), position: (0, 0).into() });
-            with_window_event(DragLeft { data: data_transfer.clone(), position: Some((0, 0).into()) });
+            with_window_event(DragEntered { id: dnd_data, position: (0, 0).into() });
+            with_window_event(DragMoved { id: dnd_data, position: (0, 0).into() });
+            with_window_event(DragDropped { id: dnd_data, position: (0, 0).into() });
+            with_window_event(DragLeft { id: dnd_data, position: Some((0, 0).into()) });
             with_window_event(Ime(Enabled));
             with_window_event(PointerMoved {
                 device_id: None,

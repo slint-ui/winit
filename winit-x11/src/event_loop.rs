@@ -7,7 +7,7 @@ use std::os::raw::*;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, LazyLock, Mutex, Weak};
+use std::sync::{Arc, LazyLock, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 use std::{fmt, mem, ptr, slice, str};
 
@@ -36,7 +36,10 @@ use x11rb::protocol::{xkb, xproto};
 use x11rb::x11_utils::X11Error as LogicalError;
 use x11rb::xcb_ffi::ReplyOrIdError;
 
-use crate::atoms::*;
+use crate::atoms::{
+    _NET_WM_PING, _NET_WM_SYNC_REQUEST, ABS_PRESSURE, ABS_TILT_X, ABS_TILT_Y, ABS_X, ABS_Y, Atoms,
+    WM_DELETE_WINDOW,
+};
 use crate::dnd::Dnd;
 use crate::event_processor::{EventProcessor, MAX_MOD_REPLAY_LEN};
 use crate::ime::{self, Ime, ImeCreationError, ImeSender};
@@ -168,6 +171,7 @@ impl<T> PeekableReceiver<T> {
 #[derive(Debug)]
 pub struct ActiveEventLoop {
     pub(crate) xconn: Arc<XConnection>,
+    pub(crate) dnd: Arc<RwLock<Dnd>>,
     pub(crate) wm_delete_window: xproto::Atom,
     pub(crate) net_wm_ping: xproto::Atom,
     pub(crate) net_wm_sync_request: xproto::Atom,
@@ -228,6 +232,7 @@ impl EventLoop {
 
         let dnd = Dnd::new(Arc::clone(&xconn))
             .expect("Failed to call XInternAtoms when initializing drag and drop");
+        let dnd = Arc::new(RwLock::new(dnd));
 
         let (ime_sender, ime_receiver) = mpsc::channel();
         let (ime_event_sender, ime_event_receiver) = mpsc::channel();
@@ -342,6 +347,7 @@ impl EventLoop {
 
         let window_target = ActiveEventLoop {
             ime,
+            dnd,
             root,
             control_flow: Cell::new(ControlFlow::default()),
             exit: Cell::new(None),
@@ -368,7 +374,6 @@ impl EventLoop {
 
         let event_processor = EventProcessor {
             target: window_target,
-            dnd,
             devices: Default::default(),
             randr_event_offset,
             ime_receiver,

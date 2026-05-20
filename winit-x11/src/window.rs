@@ -5,13 +5,14 @@ use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::os::raw::*;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::{cmp, env};
 
 use dpi::{PhysicalInsets, PhysicalPosition, PhysicalSize, Position, Size};
 use tracing::{debug, info, warn};
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::Cursor;
+use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType};
 use winit_core::error::{NotSupportedError, RequestError};
 use winit_core::event::{SurfaceSizeWriter, WindowEvent};
 use winit_core::event_loop::AsyncRequestSerial;
@@ -21,8 +22,8 @@ use winit_core::monitor::{
 };
 use winit_core::window::{
     CursorGrabMode, ImeCapabilities, ImeRequest as CoreImeRequest, ImeRequestError,
-    ResizeDirection, Theme, UserAttentionType, Window as CoreWindow, WindowAttributes,
-    WindowButtons, WindowId, WindowLevel,
+    ResizeDirection, Theme, UnknownDataTransfer, UserAttentionType, Window as CoreWindow,
+    WindowAttributes, WindowButtons, WindowId, WindowLevel,
 };
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::properties::{WmHints, WmSizeHints, WmSizeHintsSpecification};
@@ -31,7 +32,15 @@ use x11rb::protocol::sync::{ConnectionExt as _, Int64};
 use x11rb::protocol::xproto::{self, ClipOrdering, ConnectionExt as _, Rectangle};
 use x11rb::protocol::{randr, xinput};
 
-use crate::atoms::*;
+use crate::atoms::{
+    _GTK_THEME_VARIANT, _NET_ACTIVE_WINDOW, _NET_WM_ICON, _NET_WM_MOVERESIZE, _NET_WM_NAME,
+    _NET_WM_PID, _NET_WM_PING, _NET_WM_STATE, _NET_WM_STATE_ABOVE, _NET_WM_STATE_BELOW,
+    _NET_WM_STATE_FULLSCREEN, _NET_WM_STATE_HIDDEN, _NET_WM_STATE_MAXIMIZED_HORZ,
+    _NET_WM_STATE_MAXIMIZED_VERT, _NET_WM_SYNC_REQUEST, _NET_WM_SYNC_REQUEST_COUNTER,
+    _NET_WM_WINDOW_TYPE, _XEMBED, AtomName, CARD32, UTF8_STRING, WM_CHANGE_STATE,
+    WM_CLIENT_MACHINE, WM_DELETE_WINDOW, WM_PROTOCOLS, WM_STATE, XdndAware,
+};
+use crate::dnd::{Dnd, DndState, Selection};
 use crate::event_loop::{
     ALL_MASTER_DEVICES, ActivationItem, ActiveEventLoop, CookieResultExt, ICONIC_STATE, VoidCookie,
     WakeSender, X11Error, xinput_fp1616_to_float,
@@ -40,7 +49,7 @@ use crate::ime::{ImeRequest, ImeSender};
 use crate::monitor::MonitorHandle as X11MonitorHandle;
 use crate::util::{self, CustomCursor, SelectedCursor, rgba_to_cardinals};
 use crate::xdisplay::XConnection;
-use crate::{WindowAttributesX11, WindowType, ffi};
+use crate::{SelectionType, WindowAttributesX11, WindowType, ffi};
 
 #[derive(Debug)]
 pub struct Window(Arc<UnownedWindow>);
@@ -302,6 +311,104 @@ impl CoreWindow for Window {
     fn rwh_06_window_handle(&self) -> &dyn rwh_06::HasWindowHandle {
         self
     }
+
+    fn data_transfer(
+        &self,
+        id: DataTransferId,
+    ) -> Result<Box<dyn DataTransfer + '_>, UnknownDataTransfer> {
+        let Some(dnd) = self.dnd.upgrade() else {
+            return Err(UnknownDataTransfer(id));
+        };
+
+        if dnd.read().unwrap().transfer_id() != id {
+            return Err(UnknownDataTransfer(id));
+        }
+
+        Ok(Box::new(Selection::new(dnd)))
+    }
+
+    fn reject_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
+        let Some(dnd) = self.dnd.upgrade() else {
+            return Err(UnknownDataTransfer(id));
+        };
+
+        let mut dnd = dnd.write().unwrap();
+        if dnd.transfer_id() != id {
+            return Err(UnknownDataTransfer(id));
+        }
+
+        let Some(source_window) = dnd.source_window else {
+            // TODO: Should have "other error" since this isn't an unknown data transfer.
+            return Err(UnknownDataTransfer(id));
+        };
+        let window = self.0.xwindow;
+
+        unsafe {
+            dnd.send_status(window, source_window, DndState::Rejected)
+                .expect("Failed to send `XdndStatus` message.");
+        }
+        dnd.reset();
+
+        Ok(())
+    }
+
+    fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
+        let Some(dnd) = self.dnd.upgrade() else {
+            return Err(UnknownDataTransfer(id));
+        };
+
+        let dnd = dnd.read().unwrap();
+        if dnd.transfer_id() != id {
+            return Err(UnknownDataTransfer(id));
+        }
+
+        let Some(source_window) = dnd.source_window else {
+            // TODO: Should have "other error" since this isn't an unknown data transfer.
+            return Err(UnknownDataTransfer(id));
+        };
+        let window = self.0.xwindow;
+
+        unsafe {
+            dnd.send_status(window, source_window, DndState::Accepted)
+                .expect("Failed to send `XdndStatus` message.");
+        }
+
+        Ok(())
+    }
+
+    fn fetch_data_transfer(
+        &self,
+        id: DataTransferId,
+        type_: &dyn TransferType,
+    ) -> Result<(), UnknownDataTransfer> {
+        let Some(dnd) = self.dnd.upgrade() else {
+            return Err(UnknownDataTransfer(id));
+        };
+
+        let dnd = dnd.read().unwrap();
+        if dnd.transfer_id() != id {
+            return Err(UnknownDataTransfer(id));
+        }
+
+        if dnd.source_window.is_none() {
+            // TODO: Should have "other error" since this isn't an unknown data transfer.
+            return Err(UnknownDataTransfer(id));
+        }
+
+        let window = self.0.xwindow;
+
+        let atoms = self.0.xconn.atoms();
+
+        let type_ = SelectionType::from_dyn(atoms, type_).ok_or(UnknownDataTransfer(id))?;
+
+        // This results in the `SelectionNotify` event below
+        unsafe {
+            // TODO: Handle this better
+            dnd.convert_selection(window, self.0.xconn.timestamp(), type_.atom());
+        }
+
+        Ok(())
+    }
 }
 
 impl rwh_06::HasDisplayHandle for Window {
@@ -413,10 +520,11 @@ unsafe impl Sync for UnownedWindow {}
 #[derive(Debug)]
 pub struct UnownedWindow {
     pub(crate) xconn: Arc<XConnection>, // never changes
-    xwindow: xproto::Window,            // never changes
+    dnd: Weak<RwLock<Dnd>>,
+    xwindow: xproto::Window, // never changes
     #[allow(dead_code)]
     visual: u32, // never changes
-    root: xproto::Window,               // never changes
+    root: xproto::Window,    // never changes
     #[allow(dead_code)]
     screen_id: i32, // never changes
     sync_counter_id: Option<NonZeroU32>, // never changes
@@ -642,6 +750,7 @@ impl UnownedWindow {
         let mut window = UnownedWindow {
             xconn: Arc::clone(xconn),
             xwindow: xwindow as xproto::Window,
+            dnd: Arc::downgrade(&event_loop.dnd),
             visual,
             root,
             screen_id,

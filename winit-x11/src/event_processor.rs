@@ -30,8 +30,11 @@ use x11rb::protocol::xproto::{self, ConnectionExt as _, ModMask};
 use x11rb::x11_utils::{ExtensionInformation, Serialize};
 use xkbcommon_dl::xkb_mod_mask_t;
 
-use crate::atoms::*;
-use crate::dnd::{Dnd, DndState};
+use crate::atoms::{
+    _XSETTINGS_SETTINGS, AtomName, TextUriList, XdndDrop, XdndEnter, XdndLeave, XdndPosition,
+    XdndSelection,
+};
+use crate::dnd::{DndState, SelectionReader, SelectionType};
 use crate::event_loop::{
     ALL_DEVICES, ActiveEventLoop, CookieResultExt, Device, DeviceInfo, DeviceType,
     ScrollOrientation, mkdid, mkwid,
@@ -49,7 +52,6 @@ const KEYCODE_OFFSET: u8 = 8;
 
 #[derive(Debug)]
 pub struct EventProcessor {
-    pub dnd: Dnd,
     pub ime_receiver: ImeReceiver,
     pub ime_event_receiver: ImeEventReceiver,
     pub randr_event_offset: u8,
@@ -79,6 +81,8 @@ pub struct EventProcessor {
 }
 
 impl EventProcessor {
+    const DND_TYPE: AtomName = TextUriList;
+
     pub(crate) fn process_event(&mut self, xev: &mut XEvent, app: &mut dyn ApplicationHandler) {
         self.process_xevent(xev, app);
 
@@ -359,6 +363,7 @@ impl EventProcessor {
 
     fn client_message(&mut self, xev: &XClientMessageEvent, app: &mut dyn ApplicationHandler) {
         let atoms = self.target.xconn.atoms();
+        let mut dnd = self.target.dnd.write().unwrap();
 
         let window = xev.window as xproto::Window;
         let window_id = mkwid(window);
@@ -426,17 +431,25 @@ impl EventProcessor {
             let source_window = xev.data.get_long(0) as xproto::Window;
             let flags = xev.data.get_long(1);
             let version = flags >> 24;
-            self.dnd.version = Some(version);
+            dnd.version = Some(version);
             let has_more_types = flags - (flags & (c_long::MAX - 1)) == 1;
             if !has_more_types {
-                let type_list = vec![
+                let type_list = [
                     xev.data.get_long(2) as xproto::Atom,
                     xev.data.get_long(3) as xproto::Atom,
                     xev.data.get_long(4) as xproto::Atom,
-                ];
-                self.dnd.type_list = Some(type_list);
-            } else if let Ok(more_types) = unsafe { self.dnd.get_type_list(source_window) } {
-                self.dnd.type_list = Some(more_types);
+                ]
+                .map(|ty_atom| SelectionType::new(atoms, ty_atom))
+                .into_iter()
+                .collect();
+                dnd.type_list = Some(type_list);
+            } else if let Ok(more_types) = unsafe { dnd.get_type_list(source_window) } {
+                dnd.type_list = Some(
+                    more_types
+                        .into_iter()
+                        .map(|ty_atom| SelectionType::new(atoms, ty_atom))
+                        .collect(),
+                );
             }
             return;
         }
@@ -464,31 +477,12 @@ impl EventProcessor {
                 .xconn
                 .translate_coords(self.target.root, window, x, y)
                 .expect("Failed to translate window coordinates");
-            self.dnd.position = PhysicalPosition::new(coords.dst_x as f64, coords.dst_y as f64);
+            dnd.position = PhysicalPosition::new(coords.dst_x as f64, coords.dst_y as f64);
 
             // By our own state flow, `version` should never be `None` at this point.
-            let version = self.dnd.version.unwrap_or(5);
+            let version = dnd.version.unwrap_or(5);
 
-            // Action is specified in versions 2 and up, though we don't need it anyway.
-            // let action = xev.data.get_long(4);
-
-            let accepted = if let Some(ref type_list) = self.dnd.type_list {
-                type_list.contains(&atoms[TextUriList])
-            } else {
-                false
-            };
-
-            if !accepted {
-                unsafe {
-                    self.dnd
-                        .send_status(window, source_window, DndState::Rejected)
-                        .expect("Failed to send `XdndStatus` message.");
-                }
-                self.dnd.reset();
-                return;
-            }
-
-            self.dnd.source_window = Some(source_window);
+            dnd.source_window = Some(source_window);
             let time = if version == 0 {
                 // In version 0, time isn't specified
                 x11rb::CURRENT_TIME
@@ -499,26 +493,14 @@ impl EventProcessor {
             // Log this timestamp.
             self.target.xconn.set_timestamp(time);
 
-            // This results in the `SelectionNotify` event below
-            unsafe {
-                self.dnd.convert_selection(window, time);
-            }
-
-            unsafe {
-                self.dnd
-                    .send_status(window, source_window, DndState::Accepted)
-                    .expect("Failed to send `XdndStatus` message.");
-            }
             return;
         }
 
         if xev.message_type == atoms[XdndDrop] as c_ulong {
-            let (source_window, state) = if let Some(source_window) = self.dnd.source_window {
-                if let Some(Ok(ref path_list)) = self.dnd.result {
-                    let event = WindowEvent::DragDropped {
-                        paths: path_list.iter().map(Into::into).collect(),
-                        position: self.dnd.position,
-                    };
+            let (source_window, state) = if let Some(source_window) = dnd.source_window {
+                if dnd.selection.as_ref().is_some() {
+                    let event =
+                        WindowEvent::DragDropped { id: dnd.transfer_id(), position: dnd.position };
                     app.window_event(&self.target, window_id, event);
                 }
                 (source_window, DndState::Accepted)
@@ -530,21 +512,21 @@ impl EventProcessor {
             };
 
             unsafe {
-                self.dnd
-                    .send_finished(window, source_window, state)
+                dnd.send_finished(window, source_window, state)
                     .expect("Failed to send `XdndFinished` message.");
             }
 
-            self.dnd.reset();
+            dnd.reset();
             return;
         }
 
         if xev.message_type == atoms[XdndLeave] as c_ulong {
-            if self.dnd.dragging {
-                let event = WindowEvent::DragLeft { position: Some(self.dnd.position) };
+            if dnd.dragging {
+                let event =
+                    WindowEvent::DragLeft { id: dnd.transfer_id(), position: Some(dnd.position) };
                 app.window_event(&self.target, window_id, event);
             }
-            self.dnd.reset();
+            dnd.reset();
         }
     }
 
@@ -561,24 +543,23 @@ impl EventProcessor {
             return;
         }
 
+        let mut dnd_write = self.target.dnd.write().unwrap();
         // This is where we receive data from drag and drop
-        self.dnd.result = None;
-        if let Ok(mut data) = unsafe { self.dnd.read_data(window) } {
-            let parse_result = self.dnd.parse_data(&mut data);
+        let data = unsafe { dnd_write.read_data(window) };
+        let ty_ = SelectionType::new(atoms, atoms[Self::DND_TYPE]);
+        dnd_write.selection = data.ok().map(|data| SelectionReader::new(ty_, data.into()));
+        if dnd_write.selection.is_some() {
+            let event = if dnd_write.dragging {
+                WindowEvent::DragMoved { id: dnd_write.transfer_id(), position: dnd_write.position }
+            } else {
+                dnd_write.dragging = true;
+                WindowEvent::DragEntered {
+                    id: dnd_write.transfer_id(),
+                    position: dnd_write.position,
+                }
+            };
 
-            if let Ok(ref path_list) = parse_result {
-                let event = if self.dnd.dragging {
-                    WindowEvent::DragMoved { position: self.dnd.position }
-                } else {
-                    let paths = path_list.iter().map(Into::into).collect();
-                    self.dnd.dragging = true;
-                    WindowEvent::DragEntered { paths, position: self.dnd.position }
-                };
-
-                app.window_event(&self.target, window_id, event);
-            }
-
-            self.dnd.result = Some(parse_result);
+            app.window_event(&self.target, window_id, event);
         }
     }
 

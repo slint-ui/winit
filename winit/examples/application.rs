@@ -548,6 +548,7 @@ impl ApplicationHandler for Application {
             | WindowEvent::DragEntered { .. }
             | WindowEvent::DragMoved { .. }
             | WindowEvent::DragDropped { .. }
+            | WindowEvent::DataTransferResult { .. }
             | WindowEvent::Destroyed
             | WindowEvent::Ime(_)
             | WindowEvent::Moved(_) => (),
