@@ -1194,7 +1194,12 @@ pub trait Window: AsAny + Send + Sync + fmt::Debug {
 
     /// Request to fetch a type from a [data transfer](DataTransfer).
     ///
-    /// The data will be supplied via [`WindowEvent::DataTransferResult`].
+    /// The data will be supplied via [`WindowEvent::DataTransferResult`], when it is
+    /// ready.
+    ///
+    /// This does not require [`accept_drag`](Window::accept_drag) or
+    /// [`accept_drag_type`](Window::accept_drag_type) to be called first. If that is a requirement
+    /// of the platform, then the platform implementation should handle that internally.
     ///
     /// If the ID is invalid (e.g. if the lifetime of the data transfer has expired), this will
     /// return an error.
@@ -1213,7 +1218,9 @@ pub trait Window: AsAny + Send + Sync + fmt::Debug {
     /// can be dropped.
     ///
     /// Note that on some platforms (e.g. Wayland), accepting a data transfer requires specifying
-    /// one or more accepted types. Using this method will mark all available types as accepted.
+    /// one or more accepted types. For platforms that require specifying a type, `accept_drag` will
+    /// mark all available types as accepted.
+    ///
     /// For the most reliable cross-platform behaviour,
     /// [`accept_drag_type`](Window::accept_drag_type) is preferred, although in most cases
     /// simply conditionally accepting the data transfer based on whether or not it advertises a
