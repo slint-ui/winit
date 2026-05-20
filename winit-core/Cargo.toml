@@ -27,8 +27,6 @@ bitflags.workspace = true
 cursor-icon.workspace = true
 dpi.workspace = true
 keyboard-types.workspace = true
-mime.workspace = true
-foldhash.workspace = true
 rwh_06.workspace = true
 serde = { workspace = true, optional = true }
 smol_str.workspace = true

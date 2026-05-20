@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Debug};
 use std::io;
 use std::ops::Deref;
@@ -50,6 +52,32 @@ impl_dyn_casting!(TransferType);
 pub trait TypedData: AsAny + Send + Sync + fmt::Debug {
     fn type_(&self) -> &dyn TransferType;
     fn try_read(&mut self) -> Option<Box<dyn io::BufRead + '_>>;
+
+    fn try_as_uris(&mut self) -> Option<Vec<Cow<'_, OsStr>>> {
+        if self.type_().hint() != Some(TypeHint::UriList) {
+            return None;
+        }
+
+        let mut reader = self.try_read()?;
+        let mut out = String::new();
+        reader.read_to_string(&mut out).ok()?;
+
+        let uris = out.split(|c| c == '\n' || c == '\r');
+
+        Some(uris.map(|str| OsString::from(str).into()).collect())
+    }
+
+    fn try_as_plaintext(&mut self) -> Option<String> {
+        if self.type_().hint() != Some(TypeHint::UriList) {
+            return None;
+        }
+
+        let mut reader = self.try_read()?;
+        let mut out = String::new();
+        reader.read_to_string(&mut out).ok()?;
+
+        Some(out)
+    }
 }
 
 #[derive(Debug, Clone)]
