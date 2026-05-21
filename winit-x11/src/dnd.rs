@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::str::Utf8Error;
 use std::sync::{Arc, RwLock};
 
-use dpi::PhysicalPosition;
 use percent_encoding::percent_decode;
 use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypeHint, TypedData};
+use winit_core::event_loop::AsyncRequestSerial;
 use x11rb::protocol::xproto::{self, ConnectionExt};
 
 use crate::atoms::AtomName::None as DndNone;
@@ -93,6 +93,39 @@ impl TypedData for SelectionReader {
     fn type_(&self) -> &dyn TransferType {
         &self.type_
     }
+
+    fn try_as_plaintext(&mut self) -> Option<String> {
+        // We don't check that the type of this data is plaintext, as other types (e.g. HTML, URI
+        // list) are valid to read as plaintext
+        str::from_utf8(&self.data).ok().map(Into::into)
+    }
+
+    fn try_as_uris(&mut self) -> Option<Vec<String>> {
+        if self.type_().hint() != Some(TypeHint::UriList) {
+            return None;
+        }
+
+        Some(
+            self.try_as_plaintext()?
+                .split(|c| c == '\n' || c == '\r')
+                .filter(|s| !s.is_empty())
+                .map(Into::into)
+                .collect(),
+        )
+    }
+}
+
+#[derive(Debug)]
+pub struct SelectionFetchState {
+    pub serial: AsyncRequestSerial,
+    // Populated by SelectionNotify event handler
+    pub value: Option<io::Result<Box<SelectionReader>>>,
+}
+
+impl SelectionFetchState {
+    pub fn new() -> Self {
+        Self { serial: AsyncRequestSerial::get(), value: None }
+    }
 }
 
 #[derive(Debug)]
@@ -101,15 +134,11 @@ pub struct Dnd {
     transfer_id: DataTransferId,
     // Populated by XdndEnter event handler
     pub version: Option<c_long>,
-    pub type_list: Option<Vec<SelectionType>>,
+    pub type_infos: Option<Vec<SelectionType>>,
     // Populated by XdndPosition event handler
     pub source_window: Option<xproto::Window>,
-    // Populated by XdndPosition event handler
-    pub position: PhysicalPosition<f64>,
-    // Populated by SelectionNotify event handler (triggered by XdndPosition event handler)
-    pub selection: Option<SelectionReader>,
-    // Populated by SelectionNotify event handler (triggered by XdndPosition event handler)
-    pub dragging: bool,
+    // Populated by `fetch_data_transfer`
+    pub last_fetched_selection: Option<SelectionFetchState>,
 }
 
 #[derive(Debug)]
@@ -165,27 +194,26 @@ impl TransferType for SelectionType {
 }
 
 impl DataTransfer for Selection {
-    fn available_types(&self) -> Box<dyn Iterator<Item = Box<dyn TransferType>> + '_> {
-        Box::new(
-            self.dnd
-                .read()
-                .unwrap()
-                .type_list
-                .clone()
-                .into_iter()
-                .flat_map(|types| types.into_iter().map(|val| Box::new(val) as _)),
-        )
+    fn available_types(&self) -> Vec<Box<dyn TransferType>> {
+        self.dnd
+            .read()
+            .unwrap()
+            .type_infos
+            .as_ref()
+            .into_iter()
+            .flat_map(|types| types.iter().map(|val| Box::new(val.clone()) as _))
+            .collect()
     }
 
     fn has_type(&self, type_: &dyn TransferType) -> bool {
         let dnd = self.dnd.read().unwrap();
 
-        let Some(types) = dnd.type_list.as_ref() else {
+        let Some(types) = dnd.type_infos.as_ref() else {
             return false;
         };
 
         if let Some(x11_type) = type_.cast_ref() {
-            types.contains(x11_type)
+            types.iter().any(|haystack| haystack == x11_type)
         } else {
             let Some(hint) = type_.hint() else {
                 return false;
@@ -197,17 +225,19 @@ impl DataTransfer for Selection {
 }
 
 impl Dnd {
-    pub fn new(xconn: Arc<XConnection>) -> Result<Self, X11Error> {
-        Ok(Dnd {
+    pub fn new(xconn: Arc<XConnection>) -> Self {
+        Self::with_id(xconn, DataTransferId::from_raw(0))
+    }
+
+    fn with_id(xconn: Arc<XConnection>, transfer_id: DataTransferId) -> Self {
+        Dnd {
             xconn,
-            transfer_id: DataTransferId::from_raw(0),
+            transfer_id,
             version: None,
-            type_list: None,
+            type_infos: None,
             source_window: None,
-            position: PhysicalPosition::default(),
-            selection: None,
-            dragging: false,
-        })
+            last_fetched_selection: None,
+        }
     }
 
     pub fn transfer_id(&self) -> DataTransferId {
@@ -215,12 +245,9 @@ impl Dnd {
     }
 
     pub fn reset(&mut self) {
-        self.transfer_id = DataTransferId::from_raw(self.transfer_id.into_raw().wrapping_add(1));
-        self.version = None;
-        self.type_list = None;
-        self.source_window = None;
-        self.selection = None;
-        self.dragging = false;
+        let xconn = self.xconn.clone();
+        let new_id = DataTransferId::from_raw(self.transfer_id.into_raw().wrapping_add(1));
+        *self = Self::with_id(xconn, new_id);
     }
 
     pub unsafe fn send_status(

@@ -1,8 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::os::raw::{c_char, c_int, c_long, c_ulong};
-use std::slice;
 use std::sync::{Arc, Mutex};
+use std::{io, slice};
 
 use dpi::{PhysicalPosition, PhysicalSize};
 use winit_common::xkb::{self, Context, XkbState};
@@ -363,7 +363,6 @@ impl EventProcessor {
 
     fn client_message(&mut self, xev: &XClientMessageEvent, app: &mut dyn ApplicationHandler) {
         let atoms = self.target.xconn.atoms();
-        let mut dnd = self.target.dnd.write().unwrap();
 
         let window = xev.window as xproto::Window;
         let window_id = mkwid(window);
@@ -428,29 +427,43 @@ impl EventProcessor {
         }
 
         if xev.message_type == atoms[XdndEnter] as c_ulong {
-            let source_window = xev.data.get_long(0) as xproto::Window;
-            let flags = xev.data.get_long(1);
-            let version = flags >> 24;
-            dnd.version = Some(version);
-            let has_more_types = flags - (flags & (c_long::MAX - 1)) == 1;
-            if !has_more_types {
-                let type_list = [
-                    xev.data.get_long(2) as xproto::Atom,
-                    xev.data.get_long(3) as xproto::Atom,
-                    xev.data.get_long(4) as xproto::Atom,
-                ]
-                .map(|ty_atom| SelectionType::new(atoms, ty_atom))
-                .into_iter()
-                .collect();
-                dnd.type_list = Some(type_list);
-            } else if let Ok(more_types) = unsafe { dnd.get_type_list(source_window) } {
-                dnd.type_list = Some(
-                    more_types
-                        .into_iter()
-                        .map(|ty_atom| SelectionType::new(atoms, ty_atom))
-                        .collect(),
-                );
-            }
+            let transfer_id = {
+                let mut dnd = self.target.dnd.write().unwrap();
+                // We only reset when a new drag-and-drop enters, since that means that the user can
+                // read the drag info in the window event handler.
+                dnd.reset();
+
+                let source_window = xev.data.get_long(0) as xproto::Window;
+                let flags = xev.data.get_long(1);
+
+                let version = flags >> 24;
+                dnd.version = Some(version);
+                dnd.source_window = Some(source_window);
+
+                let has_more_types = flags - (flags & (c_long::MAX - 1)) == 1;
+                if !has_more_types {
+                    let type_list = [
+                        xev.data.get_long(2) as xproto::Atom,
+                        xev.data.get_long(3) as xproto::Atom,
+                        xev.data.get_long(4) as xproto::Atom,
+                    ]
+                    .map(|ty_atom| SelectionType::new(atoms, ty_atom).into())
+                    .into_iter()
+                    .collect();
+                    dnd.type_infos = Some(type_list);
+                } else if let Ok(more_types) = unsafe { dnd.get_type_list(source_window) } {
+                    dnd.type_infos = Some(
+                        more_types
+                            .into_iter()
+                            .map(|ty_atom| SelectionType::new(atoms, ty_atom).into())
+                            .collect(),
+                    );
+                }
+
+                dnd.transfer_id()
+            };
+
+            app.window_event(&self.target, window_id, WindowEvent::DragEntered { id: transfer_id });
             return;
         }
 
@@ -477,32 +490,37 @@ impl EventProcessor {
                 .xconn
                 .translate_coords(self.target.root, window, x, y)
                 .expect("Failed to translate window coordinates");
-            dnd.position = PhysicalPosition::new(coords.dst_x as f64, coords.dst_y as f64);
 
-            // By our own state flow, `version` should never be `None` at this point.
-            let version = dnd.version.unwrap_or(5);
+            let transfer_id = {
+                let mut dnd = self.target.dnd.write().unwrap();
+                // By our own state flow, `version` should never be `None` at this point.
+                let version = dnd.version.unwrap_or(5);
 
-            dnd.source_window = Some(source_window);
-            let time = if version == 0 {
-                // In version 0, time isn't specified
-                x11rb::CURRENT_TIME
-            } else {
-                xev.data.get_long(3) as xproto::Timestamp
+                dnd.source_window = Some(source_window);
+                let time = if version == 0 {
+                    // In version 0, time isn't specified
+                    x11rb::CURRENT_TIME
+                } else {
+                    xev.data.get_long(3) as xproto::Timestamp
+                };
+
+                // Log this timestamp.
+                self.target.xconn.set_timestamp(time);
+
+                dnd.transfer_id()
             };
 
-            // Log this timestamp.
-            self.target.xconn.set_timestamp(time);
+            app.window_event(&self.target, window_id, WindowEvent::DragPosition {
+                id: transfer_id,
+                position: PhysicalPosition::new(coords.dst_x as f64, coords.dst_y as f64),
+            });
 
             return;
         }
 
         if xev.message_type == atoms[XdndDrop] as c_ulong {
+            let dnd = self.target.dnd.read().unwrap();
             let (source_window, state) = if let Some(source_window) = dnd.source_window {
-                if dnd.selection.as_ref().is_some() {
-                    let event =
-                        WindowEvent::DragDropped { id: dnd.transfer_id(), position: dnd.position };
-                    app.window_event(&self.target, window_id, event);
-                }
                 (source_window, DndState::Accepted)
             } else {
                 // `source_window` won't be part of our DND state if we already rejected the drop in
@@ -511,22 +529,23 @@ impl EventProcessor {
                 (source_window, DndState::Rejected)
             };
 
+            // TODO: Ensure that this is sent after `dnd` lock is released, to prevent
+            // accidentally introducing a deadlock later down the line.
+            app.window_event(&self.target, window_id, WindowEvent::DragDropped {
+                id: dnd.transfer_id(),
+            });
+
             unsafe {
                 dnd.send_finished(window, source_window, state)
                     .expect("Failed to send `XdndFinished` message.");
             }
 
-            dnd.reset();
             return;
         }
 
         if xev.message_type == atoms[XdndLeave] as c_ulong {
-            if dnd.dragging {
-                let event =
-                    WindowEvent::DragLeft { id: dnd.transfer_id(), position: Some(dnd.position) };
-                app.window_event(&self.target, window_id, event);
-            }
-            dnd.reset();
+            let transfer_id = self.target.dnd.read().unwrap().transfer_id();
+            app.window_event(&self.target, window_id, WindowEvent::DragLeft { id: transfer_id });
         }
     }
 
@@ -539,28 +558,33 @@ impl EventProcessor {
         // Set the timestamp.
         self.target.xconn.set_timestamp(xev.time as xproto::Timestamp);
 
+        // For now, winit only supports selections for drag-and-drop. This should be changed
+        // when clipboard support is implemented.
         if xev.property != atoms[XdndSelection] as c_ulong {
             return;
         }
 
-        let mut dnd_write = self.target.dnd.write().unwrap();
         // This is where we receive data from drag and drop
-        let data = unsafe { dnd_write.read_data(window) };
-        let ty_ = SelectionType::new(atoms, atoms[Self::DND_TYPE]);
-        dnd_write.selection = data.ok().map(|data| SelectionReader::new(ty_, data.into()));
-        if dnd_write.selection.is_some() {
-            let event = if dnd_write.dragging {
-                WindowEvent::DragMoved { id: dnd_write.transfer_id(), position: dnd_write.position }
-            } else {
-                dnd_write.dragging = true;
-                WindowEvent::DragEntered {
-                    id: dnd_write.transfer_id(),
-                    position: dnd_write.position,
-                }
+        let (serial, transfer_id) = {
+            let mut dnd = self.target.dnd.write().unwrap();
+            let data = unsafe { dnd.read_data(window) };
+            let Some(selection_fetch_state) = &mut dnd.last_fetched_selection else {
+                return;
             };
+            let ty_ = SelectionType::new(atoms, atoms[Self::DND_TYPE]);
+            let new_value = data
+                .map(|data| Box::new(SelectionReader::new(ty_, data.into())))
+                .map_err(io::Error::other);
 
-            app.window_event(&self.target, window_id, event);
-        }
+            selection_fetch_state.value = Some(new_value);
+
+            (selection_fetch_state.serial, dnd.transfer_id())
+        };
+
+        app.window_event(&self.target, window_id, WindowEvent::DataTransferResult {
+            id: transfer_id,
+            serial,
+        });
     }
 
     fn configure_notify(&self, xev: &XConfigureEvent, app: &mut dyn ApplicationHandler) {

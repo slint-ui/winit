@@ -546,7 +546,7 @@ impl ApplicationHandler for Application {
             | WindowEvent::KeyboardInput { .. }
             | WindowEvent::PointerEntered { .. }
             | WindowEvent::DragEntered { .. }
-            | WindowEvent::DragMoved { .. }
+            | WindowEvent::DragPosition { .. }
             | WindowEvent::DragDropped { .. }
             | WindowEvent::DataTransferResult { .. }
             | WindowEvent::Destroyed

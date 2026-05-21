@@ -43,12 +43,8 @@
 //! implementing the traits in this module, which can then be accessed in an application
 //! using the methods defined on [`dyn AsAny`]. See each platform's documentation for details.
 
-use std::borrow::Cow;
-use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Debug};
 use std::io;
-use std::ops::Deref;
-use std::sync::Arc;
 
 use crate::as_any::AsAny;
 
@@ -128,51 +124,24 @@ impl_dyn_casting!(TransferType);
 
 /// Data that has been fetched from a data transfer
 pub trait TypedData: AsAny + Send + Sync + fmt::Debug {
+    /// The type of this `TypedData`.
     fn type_(&self) -> &dyn TransferType;
+
+    /// If this value is readable as bytes, return a reader than can be used to read those bytes.
     fn try_read(&mut self) -> Option<Box<dyn io::BufRead + '_>>;
 
-    fn try_as_uris(&mut self) -> Option<Vec<Cow<'_, OsStr>>> {
-        if self.type_().hint() != Some(TypeHint::UriList) {
-            return None;
-        }
+    /// Read this value as a list of URIs.
+    ///
+    /// If this value is not readable as URIs, return `None`.
+    ///
+    /// The format of the returned URIs is simply a vector of strings. No validation is done
+    /// to ensure that the URIs are valid or in the format
+    fn try_as_uris(&mut self) -> Option<Vec<String>>;
 
-        let mut reader = self.try_read()?;
-        let mut out = String::new();
-        reader.read_to_string(&mut out).ok()?;
-
-        let uris = out.split(|c| c == '\n' || c == '\r');
-
-        Some(uris.map(|str| OsString::from(str).into()).collect())
-    }
-
-    fn try_as_plaintext(&mut self) -> Option<String> {
-        if self.type_().hint() != Some(TypeHint::UriList) {
-            return None;
-        }
-
-        let mut reader = self.try_read()?;
-        let mut out = String::new();
-        reader.read_to_string(&mut out).ok()?;
-
-        Some(out)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct DynTypedData(pub Arc<dyn TypedData>);
-
-impl PartialEq for DynTypedData {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::addr_eq(&**self, &**other)
-    }
-}
-
-impl Deref for DynTypedData {
-    type Target = dyn TypedData;
-
-    fn deref(&self) -> &Self::Target {
-        &*self.0
-    }
+    /// Read this value as a plain text string.
+    ///
+    /// If this value is not readable as a string, return `None`.
+    fn try_as_plaintext(&mut self) -> Option<String>;
 }
 
 impl_dyn_casting!(TypedData);
@@ -188,7 +157,7 @@ pub trait DataTransfer: AsAny + Send + Sync + fmt::Debug {
     /// [`has_type`](DataTransfer::has_type) should be used.
     // TODO: We should be able to do `&dyn TransferType`, but some implementation details in
     // the platforms make that unnecessarily difficult right now. Specifically, use of `RwLock`.
-    fn available_types(&self) -> Box<dyn Iterator<Item = Box<dyn TransferType>> + '_>;
+    fn available_types(&self) -> Vec<Box<dyn TransferType>>;
 
     /// Check if the supplied type is provided by this [`DataTransfer`].
     ///
@@ -196,8 +165,9 @@ pub trait DataTransfer: AsAny + Send + Sync + fmt::Debug {
     /// platform-specific type is required then that platform's implementation of `TransferType` can
     /// be used.
     fn has_type(&self, type_: &dyn TransferType) -> bool {
+        let available_types = self.available_types();
         type_.hint().is_some_and(|hint| {
-            self.available_types().any(|haystack| haystack.hint() == Some(hint))
+            available_types.iter().any(|haystack| haystack.hint() == Some(hint))
         })
     }
 }

@@ -12,7 +12,7 @@ use dpi::{PhysicalInsets, PhysicalPosition, PhysicalSize, Position, Size};
 use tracing::{debug, info, warn};
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::Cursor;
-use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType};
+use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypedData};
 use winit_core::error::{NotSupportedError, RequestError};
 use winit_core::event::{SurfaceSizeWriter, WindowEvent};
 use winit_core::event_loop::AsyncRequestSerial;
@@ -40,7 +40,7 @@ use crate::atoms::{
     _NET_WM_WINDOW_TYPE, _XEMBED, AtomName, CARD32, UTF8_STRING, WM_CHANGE_STATE,
     WM_CLIENT_MACHINE, WM_DELETE_WINDOW, WM_PROTOCOLS, WM_STATE, XdndAware,
 };
-use crate::dnd::{Dnd, DndState, Selection};
+use crate::dnd::{Dnd, DndState, Selection, SelectionFetchState};
 use crate::event_loop::{
     ALL_MASTER_DEVICES, ActivationItem, ActiveEventLoop, CookieResultExt, ICONIC_STATE, VoidCookie,
     WakeSender, X11Error, xinput_fp1616_to_float,
@@ -315,7 +315,7 @@ impl CoreWindow for Window {
     fn data_transfer(
         &self,
         id: DataTransferId,
-    ) -> Result<Box<dyn DataTransfer + '_>, UnknownDataTransfer> {
+    ) -> Result<Box<dyn DataTransfer>, UnknownDataTransfer> {
         let Some(dnd) = self.dnd.upgrade() else {
             return Err(UnknownDataTransfer(id));
         };
@@ -380,26 +380,43 @@ impl CoreWindow for Window {
         &self,
         id: DataTransferId,
         type_: &dyn TransferType,
-    ) -> Result<(), UnknownDataTransfer> {
+    ) -> Result<AsyncRequestSerial, RequestError> {
         let Some(dnd) = self.dnd.upgrade() else {
-            return Err(UnknownDataTransfer(id));
+            return Err(RequestError::NotSupported(NotSupportedError::new(
+                "Drag-and-drop unavailable",
+            )));
         };
 
-        let dnd = dnd.read().unwrap();
+        let mut dnd = dnd.write().unwrap();
         if dnd.transfer_id() != id {
-            return Err(UnknownDataTransfer(id));
+            return Err(RequestError::NotSupported(NotSupportedError::new(
+                "Unknown data transfer",
+            )));
         }
 
         if dnd.source_window.is_none() {
-            // TODO: Should have "other error" since this isn't an unknown data transfer.
-            return Err(UnknownDataTransfer(id));
+            return Err(RequestError::NotSupported(NotSupportedError::new(
+                "Unknown source window",
+            )));
+        }
+
+        if let Some(state) = &dnd.last_fetched_selection
+            && state.value.is_some()
+        {
+            return Ok(state.serial);
         }
 
         let window = self.0.xwindow;
 
         let atoms = self.0.xconn.atoms();
 
-        let type_ = SelectionType::from_dyn(atoms, type_).ok_or(UnknownDataTransfer(id))?;
+        let type_ = SelectionType::from_dyn(atoms, type_)
+            .ok_or(RequestError::NotSupported(NotSupportedError::new("Unknown type hint")))?;
+
+        let new_fetch_state = SelectionFetchState::new();
+        let serial = new_fetch_state.serial;
+
+        dnd.last_fetched_selection = Some(new_fetch_state);
 
         // This results in the `SelectionNotify` event below
         unsafe {
@@ -407,7 +424,36 @@ impl CoreWindow for Window {
             dnd.convert_selection(window, self.0.xconn.timestamp(), type_.atom());
         }
 
-        Ok(())
+        Ok(serial)
+    }
+
+    fn data_transfer_result(
+        &self,
+        serial: AsyncRequestSerial,
+    ) -> Result<Box<dyn TypedData>, RequestError> {
+        let Some(dnd) = self.dnd.upgrade() else {
+            return Err(RequestError::NotSupported(NotSupportedError::new(
+                "Drag-and-drop unavailable",
+            )));
+        };
+
+        let dnd = dnd.read().unwrap();
+
+        if dnd.source_window.is_none() {
+            return Err(RequestError::NotSupported(NotSupportedError::new(
+                "Unknown source window",
+            )));
+        }
+
+        dnd.last_fetched_selection
+            .as_ref()
+            .filter(|state| state.serial == serial)
+            .and_then(|state| state.value.as_ref())
+            // TODO: Actually return the error to the user somehow, maybe through a dummy
+            // `TypedData` impl?
+            .and_then(|res| res.as_ref().ok())
+            .map(|reader| reader.clone() as _)
+            .ok_or(RequestError::Ignored)
     }
 }
 

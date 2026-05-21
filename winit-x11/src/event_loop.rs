@@ -230,8 +230,7 @@ impl EventLoop {
         let net_wm_ping = atoms[_NET_WM_PING];
         let net_wm_sync_request = atoms[_NET_WM_SYNC_REQUEST];
 
-        let dnd = Dnd::new(Arc::clone(&xconn))
-            .expect("Failed to call XInternAtoms when initializing drag and drop");
+        let dnd = Dnd::new(Arc::clone(&xconn));
         let dnd = Arc::new(RwLock::new(dnd));
 
         let (ime_sender, ime_receiver) = mpsc::channel();

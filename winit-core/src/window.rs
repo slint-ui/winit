@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::as_any::AsAny;
 use crate::cursor::Cursor;
-use crate::data_transfer::{DataTransfer, DataTransferId, TransferType};
-use crate::error::RequestError;
+use crate::data_transfer::{DataTransfer, DataTransferId, TransferType, TypedData};
+use crate::error::{NotSupportedError, RequestError};
+use crate::event_loop::AsyncRequestSerial;
 use crate::icon::Icon;
 use crate::monitor::{Fullscreen, MonitorHandle};
 
@@ -1188,27 +1189,7 @@ pub trait Window: AsAny + Send + Sync + fmt::Debug {
     fn data_transfer(
         &self,
         id: DataTransferId,
-    ) -> Result<Box<dyn DataTransfer + '_>, UnknownDataTransfer> {
-        Err(UnknownDataTransfer(id))
-    }
-
-    /// Request to fetch a type from a [data transfer](DataTransfer).
-    ///
-    /// The data will be supplied via [`WindowEvent::DataTransferResult`], when it is
-    /// ready.
-    ///
-    /// This does not require [`accept_drag`](Window::accept_drag) or
-    /// [`accept_drag_type`](Window::accept_drag_type) to be called first. If that is a requirement
-    /// of the platform, then the platform implementation should handle that internally.
-    ///
-    /// If the ID is invalid (e.g. if the lifetime of the data transfer has expired), this will
-    /// return an error.
-    fn fetch_data_transfer(
-        &self,
-        id: DataTransferId,
-        type_: &dyn TransferType,
-    ) -> Result<(), UnknownDataTransfer> {
-        let _ = type_;
+    ) -> Result<Box<dyn DataTransfer>, UnknownDataTransfer> {
         Err(UnknownDataTransfer(id))
     }
 
@@ -1222,9 +1203,7 @@ pub trait Window: AsAny + Send + Sync + fmt::Debug {
     /// mark all available types as accepted.
     ///
     /// For the most reliable cross-platform behaviour,
-    /// [`accept_drag_type`](Window::accept_drag_type) is preferred, although in most cases
-    /// simply conditionally accepting the data transfer based on whether or not it advertises a
-    /// supported type will do the right thing.
+    /// [`accept_drag_type`](Window::accept_drag_type) is preferred.
     fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
         Err(UnknownDataTransfer(id))
     }
@@ -1254,6 +1233,37 @@ pub trait Window: AsAny + Send + Sync + fmt::Debug {
     /// is not possible.
     fn reject_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
         Err(UnknownDataTransfer(id))
+    }
+
+    /// Request to fetch a type from a [data transfer](crate::data_transfer::DataTransfer).
+    ///
+    /// This may be called multiple times on the same [`DataTransferId`] with different types.
+    fn fetch_data_transfer(
+        &self,
+        id: DataTransferId,
+        type_: &dyn TransferType,
+    ) -> Result<AsyncRequestSerial, RequestError> {
+        let _ = id;
+        let _ = type_;
+        Err(RequestError::NotSupported(NotSupportedError::new(
+            "Cross-application data transfer (e.g. drag-and-drop, clipboard) is unsupported on \
+             this platform",
+        )))
+    }
+
+    /// Get the resolved data for a data transfer.
+    ///
+    /// Requires first calling [`fetch_data_transfer`](ActiveEventLoop::fetch_data_transfer) and
+    /// waiting for the corresponding `DataTransferResult` event.
+    fn data_transfer_result(
+        &self,
+        serial: AsyncRequestSerial,
+    ) -> Result<Box<dyn TypedData>, RequestError> {
+        let _ = serial;
+        Err(RequestError::NotSupported(NotSupportedError::new(
+            "Cross-application data transfer (e.g. drag-and-drop, clipboard) is unsupported on \
+             this platform",
+        )))
     }
 
     /// Atomically apply request to IME.
