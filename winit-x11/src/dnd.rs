@@ -138,7 +138,7 @@ pub struct Dnd {
     pub accepted: Option<bool>,
     // Populated by XdndEnter event handler
     pub version: Option<c_long>,
-    pub type_infos: Option<Vec<SelectionType>>,
+    pub types: Option<Vec<SelectionType>>,
     // Populated by XdndPosition event handler
     pub source_window: Option<xproto::Window>,
     // Populated by `fetch_data_transfer`
@@ -163,17 +163,6 @@ pub struct SelectionType {
 }
 
 impl SelectionType {
-    pub(crate) fn from_dyn(atoms: &Atoms, type_: &dyn TransferType) -> Option<Self> {
-        type_.cast_ref().cloned().or_else(|| {
-            let hint = type_.hint()?;
-
-            match hint {
-                TypeHint::UriList => Some(Self { hint: Some(hint), atom: atoms[TextUriList] }),
-                _ => None,
-            }
-        })
-    }
-
     pub(crate) fn new(atoms: &Atoms, atom: xproto::Atom) -> Self {
         let hint = if atom == atoms[TextUriList] { Some(TypeHint::UriList) } else { None };
 
@@ -202,7 +191,7 @@ impl DataTransfer for Selection {
         self.dnd
             .read()
             .unwrap()
-            .type_infos
+            .types
             .as_ref()
             .into_iter()
             .flat_map(|types| types.iter().map(|val| Box::new(val.clone()) as _))
@@ -212,7 +201,7 @@ impl DataTransfer for Selection {
     fn has_type(&self, type_: &dyn TransferType) -> bool {
         let dnd = self.dnd.read().unwrap();
 
-        let Some(types) = dnd.type_infos.as_ref() else {
+        let Some(types) = dnd.types.as_ref() else {
             return false;
         };
 
@@ -233,13 +222,17 @@ impl Dnd {
         Self::with_id(xconn, DataTransferId::from_raw(0))
     }
 
+    pub fn find_type_by_hint(&self, hint: TypeHint) -> Option<&SelectionType> {
+        self.types.as_ref()?.iter().find(|haystack| haystack.hint() == Some(hint))
+    }
+
     fn with_id(xconn: Arc<XConnection>, transfer_id: DataTransferId) -> Self {
         Dnd {
             xconn,
             transfer_id,
             accepted: None,
             version: None,
-            type_infos: None,
+            types: None,
             source_window: None,
             last_fetched_selection: None,
         }

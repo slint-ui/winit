@@ -452,9 +452,9 @@ impl EventProcessor {
                     .map(|ty_atom| SelectionType::new(atoms, ty_atom).into())
                     .into_iter()
                     .collect();
-                    dnd.type_infos = Some(type_list);
+                    dnd.types = Some(type_list);
                 } else if let Ok(more_types) = unsafe { dnd.get_type_list(source_window) } {
-                    dnd.type_infos = Some(
+                    dnd.types = Some(
                         more_types
                             .into_iter()
                             .map(|ty_atom| SelectionType::new(atoms, ty_atom).into())

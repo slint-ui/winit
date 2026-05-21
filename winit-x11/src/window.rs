@@ -420,9 +420,10 @@ impl CoreWindow for Window {
 
         let window = self.0.xwindow;
 
-        let atoms = self.0.xconn.atoms();
-
-        let type_ = SelectionType::from_dyn(atoms, type_)
+        let type_ = type_
+            .cast_ref::<SelectionType>()
+            .or_else(|| dnd.find_type_by_hint(type_.hint()?))
+            .cloned()
             .ok_or(RequestError::NotSupported(NotSupportedError::new("Unknown type hint")))?;
 
         let new_fetch_state = SelectionFetchState::new();
