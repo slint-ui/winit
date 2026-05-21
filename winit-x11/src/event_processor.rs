@@ -431,8 +431,8 @@ impl EventProcessor {
             // never contending the lock.
             let transfer_id = {
                 let mut dnd = self.target.dnd.write().unwrap();
-                // We only reset when a new drag-and-drop enters, since that means that the user can
-                // read the drag info in the window event handler.
+                // We only reset when a new drag-and-drop enters, to maximize the amount of time
+                // that the drag data can be accessed.
                 dnd.reset();
 
                 let source_window = xev.data.get_long(0) as xproto::Window;
