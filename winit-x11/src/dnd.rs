@@ -10,9 +10,7 @@ use winit_core::event_loop::AsyncRequestSerial;
 use x11rb::protocol::xproto::{self, ConnectionExt};
 
 use crate::atoms::AtomName::None as DndNone;
-use crate::atoms::{
-    Atoms, TextUriList, XdndActionPrivate, XdndFinished, XdndSelection, XdndStatus, XdndTypeList,
-};
+use crate::atoms::*;
 use crate::event_loop::{CookieResultExt, X11Error};
 use crate::util;
 use crate::xdisplay::XConnection;
@@ -118,13 +116,14 @@ impl TypedData for SelectionReader {
 #[derive(Debug)]
 pub struct SelectionFetchState {
     pub serial: AsyncRequestSerial,
+    pub type_: xproto::Atom,
     // Populated by SelectionNotify event handler
     pub value: Option<io::Result<Box<SelectionReader>>>,
 }
 
 impl SelectionFetchState {
-    pub fn new() -> Self {
-        Self { serial: AsyncRequestSerial::get(), value: None }
+    pub fn new(type_: xproto::Atom) -> Self {
+        Self { serial: AsyncRequestSerial::get(), type_, value: None }
     }
 }
 
@@ -164,7 +163,44 @@ pub struct SelectionType {
 
 impl SelectionType {
     pub(crate) fn new(atoms: &Atoms, atom: xproto::Atom) -> Self {
-        let hint = if atom == atoms[TextUriList] { Some(TypeHint::UriList) } else { None };
+        let atom_to_hint = [
+            // Files
+            (atoms[TextUriList], TypeHint::UriList),
+            (atoms[TARGETS], TypeHint::UriList),
+            (atoms[SAVE_TARGETS], TypeHint::UriList),
+            // Plaintext
+            (atoms[STRING], TypeHint::Plaintext),
+            (atoms[UTF8_STRING], TypeHint::Plaintext),
+            (atoms[TextPlain], TypeHint::Plaintext),
+            // HTML
+            (atoms[TextHtml], TypeHint::Html),
+            // RTF
+            (atoms[ApplicationRtf], TypeHint::Rtf),
+            // Audio
+            (atoms[AudioAac], TypeHint::Audio { extension_hint: Some("aac") }),
+            (atoms[AudioAiff], TypeHint::Audio { extension_hint: Some("aif") }),
+            (atoms[AudioFlac], TypeHint::Audio { extension_hint: Some("flac") }),
+            (atoms[AudioVndWav], TypeHint::Audio { extension_hint: Some("wav") }),
+            (atoms[AudioVndWave], TypeHint::Audio { extension_hint: Some("wav") }),
+            (atoms[AudioWav], TypeHint::Audio { extension_hint: Some("wav") }),
+            (atoms[AudioWave], TypeHint::Audio { extension_hint: Some("wav") }),
+            (atoms[AudioXWav], TypeHint::Audio { extension_hint: Some("wav") }),
+            (atoms[AudioOgg], TypeHint::Audio { extension_hint: Some("ogg") }),
+            (atoms[AudioMpeg], TypeHint::Audio { extension_hint: Some("mp3") }),
+            // Image
+            (atoms[ImageBmp], TypeHint::Image { extension_hint: Some("bmp") }),
+            (atoms[ImageGif], TypeHint::Image { extension_hint: Some("gif") }),
+            (atoms[ImageJpeg], TypeHint::Image { extension_hint: Some("jpg") }),
+            (atoms[ImagePjpeg], TypeHint::Image { extension_hint: Some("jpg") }),
+            (atoms[ImagePng], TypeHint::Image { extension_hint: Some("png") }),
+            (atoms[ImageRaw], TypeHint::Image { extension_hint: Some("raw") }),
+            (atoms[ImageSvg], TypeHint::Image { extension_hint: Some("svg") }),
+            (atoms[ImageTiff], TypeHint::Image { extension_hint: Some("tiff") }),
+            (atoms[ImageWebp], TypeHint::Image { extension_hint: Some("webp") }),
+            (atoms[ImageXIcon], TypeHint::Image { extension_hint: Some("ico") }),
+        ];
+        let hint =
+            atom_to_hint.iter().find_map(|(haystack, hint)| (*haystack == atom).then_some(*hint));
 
         Self { hint, atom }
     }
@@ -324,8 +360,13 @@ impl Dnd {
     pub unsafe fn read_data(
         &self,
         window: xproto::Window,
-    ) -> Result<Vec<c_uchar>, util::GetPropertyError> {
+    ) -> Result<(xproto::Atom, Vec<c_uchar>), util::GetPropertyError> {
         let atoms = self.xconn.atoms();
-        self.xconn.get_property(window, atoms[XdndSelection], atoms[TextUriList])
+        let type_ = self
+            .last_fetched_selection
+            .as_ref()
+            .map(|state| state.type_)
+            .ok_or(util::GetPropertyError::Unknown)?;
+        Ok((type_, self.xconn.get_property(window, atoms[XdndSelection], type_)?))
     }
 }

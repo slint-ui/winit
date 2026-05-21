@@ -30,10 +30,7 @@ use x11rb::protocol::xproto::{self, ConnectionExt as _, ModMask};
 use x11rb::x11_utils::{ExtensionInformation, Serialize};
 use xkbcommon_dl::xkb_mod_mask_t;
 
-use crate::atoms::{
-    _XSETTINGS_SETTINGS, AtomName, TextUriList, XdndDrop, XdndEnter, XdndLeave, XdndPosition,
-    XdndSelection,
-};
+use crate::atoms::*;
 use crate::dnd::{DndState, SelectionReader, SelectionType};
 use crate::event_loop::{
     ALL_DEVICES, ActiveEventLoop, CookieResultExt, Device, DeviceInfo, DeviceType,
@@ -81,8 +78,6 @@ pub struct EventProcessor {
 }
 
 impl EventProcessor {
-    const DND_TYPE: AtomName = TextUriList;
-
     pub(crate) fn process_event(&mut self, xev: &mut XEvent, app: &mut dyn ApplicationHandler) {
         self.process_xevent(xev, app);
 
@@ -582,13 +577,14 @@ impl EventProcessor {
         // This is where we receive data from drag and drop
         let (serial, transfer_id) = {
             let mut dnd = self.target.dnd.write().unwrap();
-            let data = unsafe { dnd.read_data(window) };
+            let result = unsafe { dnd.read_data(window) };
             let Some(selection_fetch_state) = &mut dnd.last_fetched_selection else {
                 return;
             };
-            let ty_ = SelectionType::new(atoms, atoms[Self::DND_TYPE]);
-            let new_value = data
-                .map(|data| Box::new(SelectionReader::new(ty_, data.into())))
+            let new_value = result
+                .map(|(ty, data)| {
+                    Box::new(SelectionReader::new(SelectionType::new(atoms, ty), data.into()))
+                })
                 .map_err(io::Error::other);
 
             selection_fetch_state.value = Some(new_value);

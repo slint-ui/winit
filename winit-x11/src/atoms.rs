@@ -34,7 +34,10 @@ macro_rules! atom_manager {
 atom_manager! {
     // General Use Atoms
     CARD32,
+    STRING,
     UTF8_STRING,
+    TARGETS,
+    SAVE_TARGETS,
     WM_CHANGE_STATE,
     WM_CLIENT_MACHINE,
     WM_DELETE_WINDOW,
@@ -91,7 +94,33 @@ atom_manager! {
     XdndSelection,
     XdndFinished,
     XdndTypeList,
+
+    // MIME types for reading selections
     TextUriList: b"text/uri-list",
+    TextPlain: b"text/plain",
+    TextHtml: b"text/html",
+    ApplicationRtf: b"application/rtf",
+    AudioAac: b"audio/aac",
+    AudioAiff: b"audio/aiff",
+    AudioFlac: b"audio/flac",
+    AudioWav: b"audio/wav",
+    AudioWave: b"audio/wave",
+    AudioXWav: b"audio/x-wav",
+    AudioVndWav: b"audio/vnd.wav",
+    AudioVndWave: b"audio/vnd.wave",
+    AudioMpeg: b"audio/mpeg",
+    AudioOgg: b"audio/ogg",
+    ImageBmp: b"image/bmp",
+    ImageGif: b"image/gif",
+    ImageJpeg: b"image/jpeg",
+    ImagePjpeg: b"image/pjpeg",
+    ImagePng: b"image/png",
+    ImageSvg: b"image/svg+xml",
+    ImageTiff: b"image/tiff",
+    ImageWebp: b"image/webp",
+    ImageXIcon: b"image/x-icon",
+    ImageRaw: b"image/x-panasonic-raw",
+
     None: b"None",
 
     // Miscellaneous Atoms
