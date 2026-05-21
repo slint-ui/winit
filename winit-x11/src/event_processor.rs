@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::{io, slice};
 
 use dpi::{PhysicalPosition, PhysicalSize};
+use tracing::warn;
 use winit_common::xkb::{self, Context, XkbState};
 use winit_core::application::ApplicationHandler;
 use winit_core::event::{
@@ -436,6 +437,7 @@ impl EventProcessor {
                 let version = flags >> 24;
                 dnd.version = Some(version);
                 dnd.source_window = Some(source_window);
+                dnd.target_window = Some(window);
 
                 let has_more_types = flags - (flags & (c_long::MAX - 1)) == 1;
                 if !has_more_types {
@@ -495,7 +497,13 @@ impl EventProcessor {
                 // By our own state flow, `version` should never be `None` at this point.
                 let version = dnd.version.unwrap_or(5);
 
+                if dnd.target_window != Some(window) {
+                    warn!("Received `XdndPosition` without `XdndEnter`");
+                    dnd.target_window = Some(window);
+                }
+
                 dnd.source_window = Some(source_window);
+
                 let time = if version == 0 {
                     // In version 0, time isn't specified
                     x11rb::CURRENT_TIME

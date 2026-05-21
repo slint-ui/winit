@@ -5,14 +5,13 @@ use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::os::raw::*;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::{cmp, env};
 
 use dpi::{PhysicalInsets, PhysicalPosition, PhysicalSize, Position, Size};
 use tracing::{debug, info, warn};
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::Cursor;
-use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypedData};
 use winit_core::error::{NotSupportedError, RequestError};
 use winit_core::event::{SurfaceSizeWriter, WindowEvent};
 use winit_core::event_loop::AsyncRequestSerial;
@@ -22,8 +21,8 @@ use winit_core::monitor::{
 };
 use winit_core::window::{
     CursorGrabMode, ImeCapabilities, ImeRequest as CoreImeRequest, ImeRequestError,
-    ResizeDirection, Theme, UnknownDataTransfer, UserAttentionType, Window as CoreWindow,
-    WindowAttributes, WindowButtons, WindowId, WindowLevel,
+    ResizeDirection, Theme, UserAttentionType, Window as CoreWindow, WindowAttributes,
+    WindowButtons, WindowId, WindowLevel,
 };
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::properties::{WmHints, WmSizeHints, WmSizeHintsSpecification};
@@ -33,7 +32,6 @@ use x11rb::protocol::xproto::{self, ClipOrdering, ConnectionExt as _, Rectangle}
 use x11rb::protocol::{randr, xinput};
 
 use crate::atoms::*;
-use crate::dnd::{Dnd, DndState, Selection, SelectionFetchState};
 use crate::event_loop::{
     ALL_MASTER_DEVICES, ActivationItem, ActiveEventLoop, CookieResultExt, ICONIC_STATE, VoidCookie,
     WakeSender, X11Error, xinput_fp1616_to_float,
@@ -42,7 +40,7 @@ use crate::ime::{ImeRequest, ImeSender};
 use crate::monitor::MonitorHandle as X11MonitorHandle;
 use crate::util::{self, CustomCursor, SelectedCursor, rgba_to_cardinals};
 use crate::xdisplay::XConnection;
-use crate::{SelectionType, WindowAttributesX11, WindowType, ffi};
+use crate::{WindowAttributesX11, WindowType, ffi};
 
 #[derive(Debug)]
 pub struct Window(Arc<UnownedWindow>);
@@ -304,163 +302,6 @@ impl CoreWindow for Window {
     fn rwh_06_window_handle(&self) -> &dyn rwh_06::HasWindowHandle {
         self
     }
-
-    fn data_transfer(
-        &self,
-        id: DataTransferId,
-    ) -> Result<Box<dyn DataTransfer>, UnknownDataTransfer> {
-        let Some(dnd) = self.dnd.upgrade() else {
-            return Err(UnknownDataTransfer(id));
-        };
-
-        if dnd.read().unwrap().transfer_id() != id {
-            return Err(UnknownDataTransfer(id));
-        }
-
-        Ok(Box::new(Selection::new(dnd)))
-    }
-
-    fn reject_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
-        let Some(dnd) = self.dnd.upgrade() else {
-            return Err(UnknownDataTransfer(id));
-        };
-
-        let mut dnd = dnd.write().unwrap();
-        if dnd.transfer_id() != id {
-            return Err(UnknownDataTransfer(id));
-        }
-
-        if dnd.accepted == Some(false) {
-            return Ok(());
-        }
-
-        dnd.accepted = Some(false);
-
-        let Some(source_window) = dnd.source_window else {
-            // TODO: Should have "other error" since this isn't an unknown data transfer.
-            return Err(UnknownDataTransfer(id));
-        };
-        let window = self.0.xwindow;
-
-        unsafe {
-            dnd.send_status(window, source_window, DndState::Rejected)
-                .expect("Failed to send `XdndStatus` message.");
-        }
-        dnd.reset();
-
-        Ok(())
-    }
-
-    fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
-        let Some(dnd) = self.dnd.upgrade() else {
-            return Err(UnknownDataTransfer(id));
-        };
-
-        let mut dnd = dnd.write().unwrap();
-        if dnd.transfer_id() != id {
-            return Err(UnknownDataTransfer(id));
-        }
-
-        if dnd.accepted == Some(true) {
-            return Ok(());
-        }
-
-        dnd.accepted = Some(true);
-
-        let Some(source_window) = dnd.source_window else {
-            // TODO: Should have "other error" since this isn't an unknown data transfer.
-            return Err(UnknownDataTransfer(id));
-        };
-        let window = self.0.xwindow;
-
-        unsafe {
-            dnd.send_status(window, source_window, DndState::Accepted)
-                .expect("Failed to send `XdndStatus` message.");
-        }
-
-        Ok(())
-    }
-
-    fn fetch_data_transfer(
-        &self,
-        id: DataTransferId,
-        type_: &dyn TransferType,
-    ) -> Result<AsyncRequestSerial, RequestError> {
-        let Some(dnd) = self.dnd.upgrade() else {
-            return Err(RequestError::NotSupported(NotSupportedError::new(
-                "Drag-and-drop unavailable",
-            )));
-        };
-
-        let mut dnd = dnd.write().unwrap();
-        if dnd.transfer_id() != id {
-            return Err(RequestError::NotSupported(NotSupportedError::new(
-                "Unknown data transfer",
-            )));
-        }
-
-        if dnd.source_window.is_none() {
-            return Err(RequestError::NotSupported(NotSupportedError::new(
-                "Unknown source window",
-            )));
-        }
-
-        if let Some(state) = &dnd.last_fetched_selection
-            && state.value.is_some()
-        {
-            return Ok(state.serial);
-        }
-
-        let window = self.0.xwindow;
-
-        let type_ = type_
-            .cast_ref::<SelectionType>()
-            .or_else(|| dnd.find_type_by_hint(type_.hint()?))
-            .cloned()
-            .ok_or(RequestError::NotSupported(NotSupportedError::new("Unknown type hint")))?;
-
-        let new_fetch_state = SelectionFetchState::new(type_.atom());
-        let serial = new_fetch_state.serial;
-
-        dnd.last_fetched_selection = Some(new_fetch_state);
-
-        // This results in the `SelectionNotify` event below
-        unsafe {
-            // TODO: Handle this better
-            dnd.convert_selection(window, self.0.xconn.timestamp(), type_.atom());
-        }
-
-        Ok(serial)
-    }
-
-    fn data_transfer_result(
-        &self,
-        serial: AsyncRequestSerial,
-    ) -> Result<Box<dyn TypedData>, RequestError> {
-        let Some(dnd) = self.dnd.upgrade() else {
-            return Err(RequestError::NotSupported(NotSupportedError::new(
-                "Drag-and-drop unavailable",
-            )));
-        };
-
-        let dnd = dnd.read().unwrap();
-
-        if dnd.source_window.is_none() {
-            return Err(RequestError::NotSupported(NotSupportedError::new(
-                "Unknown source window",
-            )));
-        }
-
-        dnd.last_fetched_selection
-            .as_ref()
-            .filter(|state| state.serial == serial)
-            .and_then(|state| state.value.as_ref())
-            // TODO: Actually return the error to the user somehow, maybe through a dummy
-            // `TypedData` impl?
-            .and_then(|res| res.as_ref().ok())
-            .map(|reader| reader.clone() as _)
-            .ok_or(RequestError::Ignored)
-    }
 }
 
 impl rwh_06::HasDisplayHandle for Window {
@@ -572,11 +413,10 @@ unsafe impl Sync for UnownedWindow {}
 #[derive(Debug)]
 pub struct UnownedWindow {
     pub(crate) xconn: Arc<XConnection>, // never changes
-    dnd: Weak<RwLock<Dnd>>,
-    xwindow: xproto::Window, // never changes
+    xwindow: xproto::Window,            // never changes
     #[allow(dead_code)]
     visual: u32, // never changes
-    root: xproto::Window,    // never changes
+    root: xproto::Window,               // never changes
     #[allow(dead_code)]
     screen_id: i32, // never changes
     sync_counter_id: Option<NonZeroU32>, // never changes
@@ -802,7 +642,6 @@ impl UnownedWindow {
         let mut window = UnownedWindow {
             xconn: Arc::clone(xconn),
             xwindow: xwindow as xproto::Window,
-            dnd: Arc::downgrade(&event_loop.dnd),
             visual,
             root,
             screen_id,

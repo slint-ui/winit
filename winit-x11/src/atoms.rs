@@ -98,7 +98,9 @@ atom_manager! {
     // MIME types for reading selections
     TextUriList: b"text/uri-list",
     TextPlain: b"text/plain",
+    TextPlainCharsetUtf8: b"text/plain; charset=utf-8",
     TextHtml: b"text/html",
+    TextHtmlCharsetUtf8: b"text/html; charset=utf-8",
     ApplicationRtf: b"application/rtf",
     AudioAac: b"audio/aac",
     AudioAiff: b"audio/aiff",

@@ -19,13 +19,14 @@ use tracing::warn;
 use winit_common::xkb::Context;
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{CustomCursor as CoreCustomCursor, CustomCursorSource};
-use winit_core::error::{EventLoopError, RequestError};
+use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypedData};
+use winit_core::error::{EventLoopError, NotSupportedError, RequestError};
 use winit_core::event::{DeviceId, StartCause, WindowEvent};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents,
+    ActiveEventLoop as RootActiveEventLoop, AsyncRequestSerial, ControlFlow, DeviceEvents,
     EventLoopProxy as CoreEventLoopProxy, EventLoopProxyProvider,
-    OwnedDisplayHandle as CoreOwnedDisplayHandle,
+    OwnedDisplayHandle as CoreOwnedDisplayHandle, UnknownDataTransfer,
 };
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
 use winit_core::window::{Theme, Window as CoreWindow, WindowAttributes, WindowId};
@@ -37,13 +38,13 @@ use x11rb::x11_utils::X11Error as LogicalError;
 use x11rb::xcb_ffi::ReplyOrIdError;
 
 use crate::atoms::*;
-use crate::dnd::Dnd;
+use crate::dnd::{Dnd, DndState, SelectionFetchState};
 use crate::event_processor::{EventProcessor, MAX_MOD_REPLAY_LEN};
 use crate::ime::{self, Ime, ImeCreationError, ImeSender};
 use crate::util::{self, CustomCursor};
 use crate::window::{UnownedWindow, Window};
 use crate::xdisplay::{XConnection, XError, XNotSupported};
-use crate::{XlibErrorHook, ffi, xsettings};
+use crate::{Selection, SelectionType, XlibErrorHook, ffi, xsettings};
 
 // Xinput constants not defined in x11rb
 pub(crate) const ALL_DEVICES: u16 = 0;
@@ -759,6 +760,157 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
     fn rwh_06_handle(&self) -> &dyn rwh_06::HasDisplayHandle {
         self
+    }
+
+    fn data_transfer(
+        &self,
+        id: DataTransferId,
+    ) -> Result<Box<dyn DataTransfer>, UnknownDataTransfer> {
+        if self.dnd.read().unwrap().transfer_id() != id {
+            return Err(UnknownDataTransfer(id));
+        }
+
+        Ok(Box::new(Selection::new(self.dnd.clone())))
+    }
+
+    fn reject_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
+        let mut dnd = self.dnd.write().unwrap();
+        if dnd.transfer_id() != id {
+            return Err(UnknownDataTransfer(id));
+        }
+
+        if dnd.accepted == Some(false) {
+            return Ok(());
+        }
+
+        dnd.accepted = Some(false);
+
+        let Some(source_window) = dnd.source_window else {
+            // TODO: Should have "other error" since this isn't an unknown data transfer.
+            return Err(UnknownDataTransfer(id));
+        };
+
+        let Some(window) = dnd.target_window else {
+            // TODO: Should have "other error" since this isn't an unknown data transfer.
+            return Err(UnknownDataTransfer(id));
+        };
+
+        unsafe {
+            dnd.send_status(window, source_window, DndState::Rejected)
+                .expect("Failed to send `XdndStatus` message.");
+        }
+        dnd.reset();
+
+        Ok(())
+    }
+
+    fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
+        let mut dnd = self.dnd.write().unwrap();
+        if dnd.transfer_id() != id {
+            return Err(UnknownDataTransfer(id));
+        }
+
+        if dnd.accepted == Some(true) {
+            return Ok(());
+        }
+
+        dnd.accepted = Some(true);
+
+        let Some(source_window) = dnd.source_window else {
+            // TODO: Should have "other error" since this isn't an unknown data transfer.
+            return Err(UnknownDataTransfer(id));
+        };
+
+        let Some(window) = dnd.target_window else {
+            // TODO: Should have "other error" since this isn't an unknown data transfer.
+            return Err(UnknownDataTransfer(id));
+        };
+
+        unsafe {
+            dnd.send_status(window, source_window, DndState::Accepted)
+                .expect("Failed to send `XdndStatus` message.");
+        }
+
+        Ok(())
+    }
+
+    fn fetch_data_transfer(
+        &self,
+        id: DataTransferId,
+        type_: &dyn TransferType,
+    ) -> Result<AsyncRequestSerial, RequestError> {
+        let mut dnd = self.dnd.write().unwrap();
+        if dnd.transfer_id() != id {
+            return Err(RequestError::NotSupported(NotSupportedError::new(
+                "Unknown data transfer",
+            )));
+        }
+
+        if dnd.source_window.is_none() {
+            return Err(RequestError::NotSupported(NotSupportedError::new(
+                "Unknown source window",
+            )));
+        }
+
+        if let Some(state) = &dnd.last_fetched_selection
+            && state.value.is_some()
+        {
+            return Ok(state.serial);
+        }
+
+        let Some(window) = dnd.target_window else {
+            return Err(RequestError::NotSupported(NotSupportedError::new(
+                "Unknown target window",
+            )));
+        };
+
+        let type_ = type_
+            .cast_ref::<SelectionType>()
+            .or_else(|| dnd.find_type_by_hint(type_.hint()?))
+            .cloned()
+            .ok_or(RequestError::NotSupported(NotSupportedError::new("Unknown type hint")))?;
+
+        let new_fetch_state = SelectionFetchState::new(type_.atom());
+        let serial = new_fetch_state.serial;
+
+        dnd.last_fetched_selection = Some(new_fetch_state);
+
+        // This results in the `SelectionNotify` event below
+        unsafe {
+            // TODO: Handle this better
+            dnd.convert_selection(window, self.xconn.timestamp(), type_.atom());
+        }
+
+        Ok(serial)
+    }
+
+    fn data_transfer_result(
+        &self,
+        serial: AsyncRequestSerial,
+    ) -> Result<Box<dyn TypedData>, RequestError> {
+        let dnd = self.dnd.read().unwrap();
+
+        if dnd.source_window.is_none() {
+            return Err(RequestError::NotSupported(NotSupportedError::new(
+                "Unknown source window",
+            )));
+        }
+
+        if dnd.target_window.is_none() {
+            return Err(RequestError::NotSupported(NotSupportedError::new(
+                "Unknown target window",
+            )));
+        }
+
+        dnd.last_fetched_selection
+            .as_ref()
+            .filter(|state| state.serial == serial)
+            .and_then(|state| state.value.as_ref())
+            // TODO: Actually return the error to the user somehow, maybe through a dummy
+            // `TypedData` impl?
+            .and_then(|res| res.as_ref().ok())
+            .map(|reader| reader.clone() as _)
+            .ok_or(RequestError::Ignored)
     }
 }
 

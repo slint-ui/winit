@@ -3,7 +3,7 @@ pub mod pump_events;
 pub mod register;
 pub mod run_on_demand;
 
-use std::fmt::{self, Debug};
+use std::fmt::{self, Debug, Display};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -13,9 +13,23 @@ use rwh_06::{DisplayHandle, HandleError, HasDisplayHandle};
 use crate::Instant;
 use crate::as_any::AsAny;
 use crate::cursor::{CustomCursor, CustomCursorSource};
-use crate::error::RequestError;
+use crate::data_transfer::{DataTransfer, DataTransferId, TransferType, TypedData};
+use crate::error::{NotSupportedError, RequestError};
 use crate::monitor::MonitorHandle;
 use crate::window::{Theme, Window, WindowAttributes};
+
+/// An operation was attempted on a data transfer ID, but that ID was invalid.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct UnknownDataTransfer(pub DataTransferId);
+
+impl Display for UnknownDataTransfer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = self.0.into_raw();
+        write!(f, "Unknown data transfer with ID {id}")
+    }
+}
+
+impl std::error::Error for UnknownDataTransfer {}
 
 pub trait ActiveEventLoop: AsAny + fmt::Debug {
     /// Creates an [`EventLoopProxy`] that can be used to dispatch user events
@@ -114,6 +128,93 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
 
     /// Get the raw-window-handle handle.
     fn rwh_06_handle(&self) -> &dyn HasDisplayHandle;
+
+    /// Request to fetch a type from a [data transfer](crate::data_transfer::DataTransfer).
+    ///
+    /// This may be called multiple times on the same [`DataTransferId`] with different types.
+    fn fetch_data_transfer(
+        &self,
+        id: DataTransferId,
+        type_: &dyn TransferType,
+    ) -> Result<AsyncRequestSerial, RequestError> {
+        let _ = id;
+        let _ = type_;
+        Err(RequestError::NotSupported(NotSupportedError::new(
+            "Cross-application data transfer (e.g. drag-and-drop, clipboard) is unsupported on \
+             this platform",
+        )))
+    }
+
+    /// Get the resolved data for a data transfer.
+    ///
+    /// Requires first calling [`fetch_data_transfer`](ActiveEventLoop::fetch_data_transfer) and
+    /// waiting for the corresponding `DataTransferResult` event.
+    fn data_transfer_result(
+        &self,
+        serial: AsyncRequestSerial,
+    ) -> Result<Box<dyn TypedData>, RequestError> {
+        let _ = serial;
+        Err(RequestError::NotSupported(NotSupportedError::new(
+            "Cross-application data transfer (e.g. drag-and-drop, clipboard) is unsupported on \
+             this platform",
+        )))
+    }
+
+    /// Get a [data transfer](DataTransfer) by its ID.
+    ///
+    /// If the ID is invalid (e.g. if the lifetime of the data transfer has expired), this will
+    /// return an error.
+    fn data_transfer(
+        &self,
+        id: DataTransferId,
+    ) -> Result<Box<dyn DataTransfer>, UnknownDataTransfer> {
+        Err(UnknownDataTransfer(id))
+    }
+
+    /// Mark a given data transfer ID as being accepted by the window. By default, a drag will be
+    /// rejected.
+    ///
+    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data
+    /// can be dropped.
+    ///
+    /// Note that on some platforms (e.g. Wayland), accepting a data transfer requires specifying
+    /// one or more accepted types. For platforms that require specifying a type, `accept_drag` will
+    /// mark all available types as accepted.
+    ///
+    /// For the most reliable cross-platform behaviour,
+    /// [`accept_drag_type`](Window::accept_drag_type) is preferred.
+    fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
+        Err(UnknownDataTransfer(id))
+    }
+
+    /// Mark a single type of a given data transfer ID as being accepted by the window. By default,
+    /// a drag will be rejected.
+    ///
+    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data
+    /// can be dropped.
+    ///
+    /// If the window may accept more than one of the advertised types, this method should be
+    /// called multiple times, once for each of the accepted types.
+    fn accept_drag_type(
+        &self,
+        id: DataTransferId,
+        type_: &dyn TransferType,
+    ) -> Result<(), UnknownDataTransfer> {
+        let _ = type_;
+        self.accept_drag(id)
+    }
+
+    /// Mark a given data transfer ID as being rejected by the window. This is the default if
+    /// `accept_drag`/`accept_drag_type` is never called.
+    ///
+    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data
+    /// can _not_ be dropped.
+    ///
+    /// This will ensure that the OS/compositor indicates to the user that dropping the dragged data
+    /// is not possible.
+    fn reject_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
+        Err(UnknownDataTransfer(id))
+    }
 }
 
 impl HasDisplayHandle for dyn ActiveEventLoop + '_ {

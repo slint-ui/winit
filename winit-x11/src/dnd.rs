@@ -92,10 +92,41 @@ impl TypedData for SelectionReader {
         &self.type_
     }
 
-    fn try_as_plaintext(&mut self) -> Option<String> {
-        // We don't check that the type of this data is plaintext, as other types (e.g. HTML, URI
-        // list) are valid to read as plaintext
-        percent_decode(&self.data).decode_utf8().ok().map(Into::into)
+    fn try_as_string(&mut self) -> Option<String> {
+        fn decode_utf16_bytes(bytes: &[u8]) -> Option<String> {
+            let utf16 = bytes
+                .chunks_exact(2)
+                .into_iter()
+                .map(|chunk| {
+                    let bytes: &[u8; 2] = chunk.try_into().unwrap();
+                    u16::from_ne_bytes(*bytes)
+                })
+                .collect::<Vec<_>>();
+            String::from_utf16(&utf16).ok()
+        }
+
+        match self.type_.hint() {
+            Some(TypeHint::Plaintext) | Some(TypeHint::Html) => {
+                // Bad way to detect UTF-16 - some applications (confirmed to at least happen with
+                // Firefox) don't emit a BOM when passing HTML, so we need to check:
+                // A) Does the string contain a null
+                // B) Can the string be decoded as UTF-8
+                if self.data.contains(&0) {
+                    decode_utf16_bytes(&self.data)
+                        // Even if we guess that it's utf-16, we'll still try utf-8 just in case
+                        .or_else(|| str::from_utf8(&self.data).ok().map(|str| str.to_owned()))
+                } else {
+                    str::from_utf8(&self.data)
+                        .map(|str| str.to_owned())
+                        .ok()
+                        .or_else(|| decode_utf16_bytes(&self.data))
+                }
+            },
+            Some(TypeHint::UriList) => {
+                percent_decode(&self.data).decode_utf8().ok().map(Into::into)
+            },
+            _ => None,
+        }
     }
 
     fn try_as_uris(&mut self) -> Option<Vec<String>> {
@@ -104,7 +135,7 @@ impl TypedData for SelectionReader {
         }
 
         Some(
-            self.try_as_plaintext()?
+            self.try_as_string()?
                 .split(|c| c == '\n' || c == '\r')
                 .filter(|s| !s.is_empty())
                 .map(Into::into)
@@ -138,8 +169,10 @@ pub struct Dnd {
     // Populated by XdndEnter event handler
     pub version: Option<c_long>,
     pub types: Option<Vec<SelectionType>>,
-    // Populated by XdndPosition event handler
+    // Populated by Xdnd* event handlers
     pub source_window: Option<xproto::Window>,
+    // Populated by Xdnd* event handlers
+    pub target_window: Option<xproto::Window>,
     // Populated by `fetch_data_transfer`
     pub last_fetched_selection: Option<SelectionFetchState>,
 }
@@ -172,8 +205,10 @@ impl SelectionType {
             (atoms[STRING], TypeHint::Plaintext),
             (atoms[UTF8_STRING], TypeHint::Plaintext),
             (atoms[TextPlain], TypeHint::Plaintext),
+            (atoms[TextPlainCharsetUtf8], TypeHint::Plaintext),
             // HTML
             (atoms[TextHtml], TypeHint::Html),
+            (atoms[TextHtmlCharsetUtf8], TypeHint::Html),
             // RTF
             (atoms[ApplicationRtf], TypeHint::Rtf),
             // Audio
@@ -270,6 +305,7 @@ impl Dnd {
             version: None,
             types: None,
             source_window: None,
+            target_window: None,
             last_fetched_selection: None,
         }
     }
@@ -353,6 +389,8 @@ impl Dnd {
         let atoms = self.xconn.atoms();
         self.xconn
             .xcb_connection()
+            // TODO: We store the converted selection back to `XdndSelection`. We should store to
+            // some new place so that `XdndSelection` remains untouched.
             .convert_selection(window, atoms[XdndSelection], new_type, atoms[XdndSelection], time)
             .expect_then_ignore_error("Failed to send XdndSelection event")
     }

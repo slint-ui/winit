@@ -141,7 +141,7 @@ pub trait TypedData: AsAny + Send + Sync + fmt::Debug {
     /// Read this value as a plain text string.
     ///
     /// If this value is not readable as a string, return `None`.
-    fn try_as_plaintext(&mut self) -> Option<String>;
+    fn try_as_string(&mut self) -> Option<String>;
 }
 
 impl_dyn_casting!(TypedData);
