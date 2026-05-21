@@ -337,6 +337,12 @@ impl CoreWindow for Window {
             return Err(UnknownDataTransfer(id));
         }
 
+        if dnd.accepted == Some(false) {
+            return Ok(());
+        }
+
+        dnd.accepted = Some(false);
+
         let Some(source_window) = dnd.source_window else {
             // TODO: Should have "other error" since this isn't an unknown data transfer.
             return Err(UnknownDataTransfer(id));
@@ -357,10 +363,16 @@ impl CoreWindow for Window {
             return Err(UnknownDataTransfer(id));
         };
 
-        let dnd = dnd.read().unwrap();
+        let mut dnd = dnd.write().unwrap();
         if dnd.transfer_id() != id {
             return Err(UnknownDataTransfer(id));
         }
+
+        if dnd.accepted == Some(true) {
+            return Ok(());
+        }
+
+        dnd.accepted = Some(true);
 
         let Some(source_window) = dnd.source_window else {
             // TODO: Should have "other error" since this isn't an unknown data transfer.

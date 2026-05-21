@@ -97,7 +97,7 @@ impl TypedData for SelectionReader {
     fn try_as_plaintext(&mut self) -> Option<String> {
         // We don't check that the type of this data is plaintext, as other types (e.g. HTML, URI
         // list) are valid to read as plaintext
-        str::from_utf8(&self.data).ok().map(Into::into)
+        percent_decode(&self.data).decode_utf8().ok().map(Into::into)
     }
 
     fn try_as_uris(&mut self) -> Option<Vec<String>> {
@@ -132,6 +132,10 @@ impl SelectionFetchState {
 pub struct Dnd {
     xconn: Arc<XConnection>,
     transfer_id: DataTransferId,
+    /// Whether the drag operation is accepted (or `None` if the user never indicated that it's
+    /// accepted or rejected)
+    // Populated by `Window::accept_drag`/`Window::reject_drag`.
+    pub accepted: Option<bool>,
     // Populated by XdndEnter event handler
     pub version: Option<c_long>,
     pub type_infos: Option<Vec<SelectionType>>,
@@ -233,6 +237,7 @@ impl Dnd {
         Dnd {
             xconn,
             transfer_id,
+            accepted: None,
             version: None,
             type_infos: None,
             source_window: None,

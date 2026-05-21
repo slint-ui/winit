@@ -80,12 +80,6 @@ impl ApplicationHandler for Application {
                 {
                     *received = true;
                 }
-
-                if let Some(window) = self.window.as_ref() {
-                    let mut data = window.data_transfer_result(serial).unwrap();
-                    let uris = data.try_as_uris().unwrap();
-                    info!("{uris:#?}");
-                }
             },
             WindowEvent::DragEntered { id } => {
                 info!("{event:?}");
@@ -112,6 +106,7 @@ impl ApplicationHandler for Application {
 
                     if !data_transfer.has_type(&type_) {
                         info!("Cannot drop (cannot interpret input as URI list)");
+                        window.reject_drag(id).unwrap();
                         return;
                     }
 

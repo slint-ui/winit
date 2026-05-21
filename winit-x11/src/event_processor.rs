@@ -427,6 +427,8 @@ impl EventProcessor {
         }
 
         if xev.message_type == atoms[XdndEnter] as c_ulong {
+            // Cautiously limit the scope of the `dnd` lock so we don't rely on `app.window_event`
+            // never contending the lock.
             let transfer_id = {
                 let mut dnd = self.target.dnd.write().unwrap();
                 // We only reset when a new drag-and-drop enters, since that means that the user can
@@ -491,6 +493,8 @@ impl EventProcessor {
                 .translate_coords(self.target.root, window, x, y)
                 .expect("Failed to translate window coordinates");
 
+            // Cautiously limit the scope of the `dnd` lock so we don't rely on `app.window_event`
+            // never contending the lock.
             let transfer_id = {
                 let mut dnd = self.target.dnd.write().unwrap();
                 // By our own state flow, `version` should never be `None` at this point.
@@ -506,6 +510,17 @@ impl EventProcessor {
 
                 // Log this timestamp.
                 self.target.xconn.set_timestamp(time);
+
+                let status = if dnd.accepted.unwrap_or_default() {
+                    DndState::Accepted
+                } else {
+                    DndState::Rejected
+                };
+
+                unsafe {
+                    dnd.send_status(window, source_window, status)
+                        .expect("Failed to send `XdndStatus` message.");
+                }
 
                 dnd.transfer_id()
             };

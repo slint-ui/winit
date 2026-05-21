@@ -1193,7 +1193,8 @@ pub trait Window: AsAny + Send + Sync + fmt::Debug {
         Err(UnknownDataTransfer(id))
     }
 
-    /// Mark a given data transfer ID as being accepted by the window.
+    /// Mark a given data transfer ID as being accepted by the window. By default, a drag will be
+    /// rejected.
     ///
     /// This allows the OS/compositor to display the correct UI, indicating that the dragged data
     /// can be dropped.
@@ -1208,7 +1209,8 @@ pub trait Window: AsAny + Send + Sync + fmt::Debug {
         Err(UnknownDataTransfer(id))
     }
 
-    /// Mark a single type of a given data transfer ID as being accepted by the window.
+    /// Mark a single type of a given data transfer ID as being accepted by the window. By default,
+    /// a drag will be rejected.
     ///
     /// This allows the OS/compositor to display the correct UI, indicating that the dragged data
     /// can be dropped.
@@ -1224,7 +1226,8 @@ pub trait Window: AsAny + Send + Sync + fmt::Debug {
         self.accept_drag(id)
     }
 
-    /// Mark a given data transfer ID as being rejected by the window.
+    /// Mark a given data transfer ID as being rejected by the window. This is the default if
+    /// `accept_drag`/`accept_drag_type` is never called.
     ///
     /// This allows the OS/compositor to display the correct UI, indicating that the dragged data
     /// can _not_ be dropped.
