@@ -44,6 +44,7 @@ use objc2_foundation::{
 use tracing::{debug_span, trace, warn};
 use winit_common::core_foundation::MainRunLoop;
 use winit_core::cursor::Cursor;
+use winit_core::data_transfer::DataTransferId;
 use winit_core::error::{NotSupportedError, RequestError};
 use winit_core::event::{SurfaceSizeWriter, WindowEvent};
 use winit_core::icon::Icon;
@@ -60,12 +61,15 @@ use super::monitor::{self, MonitorHandle, flip_window_screen_coordinates, get_di
 use super::util::cgerr;
 use super::view::WinitView;
 use super::window::{WinitPanel, WinitWindow, window_id};
+use crate::dnd::Pasteboard;
 use crate::{OptionAsAlt, WindowAttributesMacOS, WindowExtMacOS};
 
 #[derive(Debug)]
 pub(crate) struct State {
     /// Strong reference to the global application state.
     app_state: Rc<AppState>,
+
+    drag_state: Cell<Option<DataTransferId>>,
 
     window: Retained<NSWindow>,
 
@@ -364,30 +368,21 @@ define_class!(
         fn dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
             let _entered = debug_span!("draggingEntered:").entered();
 
-            use std::path::PathBuf;
-
             let pb = sender.draggingPasteboard();
-
-            #[allow(deprecated)]
-            let property_list = match pb.propertyListForType(unsafe { NSFilenamesPboardType }) {
-                Some(property_list) => property_list,
-                None => return false.into(),
-            };
-
-            let paths = property_list
-                .downcast::<NSArray>()
-                .unwrap()
-                .into_iter()
-                .map(|file| PathBuf::from(file.downcast::<NSString>().unwrap().to_string()))
-                .collect();
-
             let dl = sender.draggingLocation();
             let dl = self.view().convertPoint_fromView(dl, None);
             let position =
                 LogicalPosition::<f64>::from((dl.x, dl.y)).to_physical(self.scale_factor());
 
-            self.queue_event(WindowEvent::DragEntered { paths, position });
+            let vars = self.ivars();
 
+            let transfer_id = vars.app_state.dnd().insert(pb);
+            self.queue_event(WindowEvent::DragEntered {
+                id: transfer_id,
+                position: Some(position),
+            });
+
+            vars.drag_state.set(Some(transfer_id));
             true
         }
 
@@ -403,12 +398,22 @@ define_class!(
         fn dragging_updated(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
             let _entered = debug_span!("draggingUpdated:").entered();
 
+            let vars = self.ivars();
+
+            let Some(transfer_id) = vars.drag_state.get() else {
+                return false.into();
+            };
+
+            let pb = sender.draggingPasteboard();
+
+            vars.app_state.dnd().set_pasteboard(transfer_id, pb);
+
             let dl = sender.draggingLocation();
             let dl = self.view().convertPoint_fromView(dl, None);
             let position =
                 LogicalPosition::<f64>::from((dl.x, dl.y)).to_physical(self.scale_factor());
 
-            self.queue_event(WindowEvent::DragMoved { position });
+            self.queue_event(WindowEvent::DragPosition { id: transfer_id, position });
 
             true
         }
@@ -425,29 +430,24 @@ define_class!(
         fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
             let _entered = debug_span!("performDragOperation:").entered();
 
-            use std::path::PathBuf;
+            let vars = self.ivars();
+
+            let Some(transfer_id) = vars.drag_state.get() else {
+                return false.into();
+            };
 
             let pb = sender.draggingPasteboard();
 
-            #[allow(deprecated)]
-            let property_list = match pb.propertyListForType(unsafe { NSFilenamesPboardType }) {
-                Some(property_list) => property_list,
-                None => return false.into(),
-            };
-
-            let paths = property_list
-                .downcast::<NSArray>()
-                .unwrap()
-                .into_iter()
-                .map(|file| PathBuf::from(file.downcast::<NSString>().unwrap().to_string()))
-                .collect();
+            let transfer_id = transfer_id;
+            vars.app_state.dnd().set_pasteboard(transfer_id, pb);
 
             let dl = sender.draggingLocation();
             let dl = self.view().convertPoint_fromView(dl, None);
             let position =
                 LogicalPosition::<f64>::from((dl.x, dl.y)).to_physical(self.scale_factor());
 
-            self.queue_event(WindowEvent::DragDropped { paths, position });
+            self.queue_event(WindowEvent::DragPosition { id: transfer_id, position });
+            self.queue_event(WindowEvent::DragDropped { id: transfer_id });
 
             true
         }
@@ -456,6 +456,12 @@ define_class!(
         #[unsafe(method(concludeDragOperation:))]
         fn conclude_drag_operation(&self, _sender: Option<&NSObject>) {
             let _entered = debug_span!("concludeDragOperation:").entered();
+            let vars = self.ivars();
+
+            if let Some(transfer_id) = vars.drag_state.get() {
+                vars.app_state.dnd().remove(transfer_id);
+                vars.drag_state.set(None);
+            }
         }
 
         /// Invoked when the dragging operation is cancelled
@@ -463,13 +469,29 @@ define_class!(
         fn dragging_exited(&self, sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
             let _entered = debug_span!("draggingExited:").entered();
 
-            let position = sender.map(|sender| {
+            let vars = self.ivars();
+            let Some(transfer_id) = vars.drag_state.get() else {
+                return;
+            };
+
+            if let Some(sender) = sender {
+                let pb = sender.draggingPasteboard();
+                vars.app_state.dnd().set_pasteboard(transfer_id, pb);
+
                 let dl = sender.draggingLocation();
                 let dl = self.view().convertPoint_fromView(dl, None);
-                LogicalPosition::<f64>::from((dl.x, dl.y)).to_physical(self.scale_factor())
-            });
+                let position =
+                    LogicalPosition::<f64>::from((dl.x, dl.y)).to_physical(self.scale_factor());
 
-            self.queue_event(WindowEvent::DragLeft { position });
+                self.queue_event(WindowEvent::DragPosition { id: transfer_id, position });
+            }
+
+            self.queue_event(WindowEvent::DragLeft { id: transfer_id });
+
+            if let Some(transfer_id) = vars.drag_state.get() {
+                vars.app_state.dnd().remove(transfer_id);
+                vars.drag_state.set(None);
+            }
         }
     }
 
@@ -816,6 +838,7 @@ impl WindowDelegate {
 
         let delegate = mtm.alloc().set_ivars(State {
             app_state: Rc::clone(app_state),
+            drag_state: Default::default(),
             window: window.retain(),
             previous_position: Cell::new(flip_window_screen_coordinates(window.frame())),
             previous_scale_factor: Cell::new(scale_factor),

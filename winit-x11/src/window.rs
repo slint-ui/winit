@@ -302,6 +302,67 @@ impl CoreWindow for Window {
     fn rwh_06_window_handle(&self) -> &dyn rwh_06::HasWindowHandle {
         self
     }
+
+    fn reject_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
+        let mut dnd = self.dnd.write().unwrap();
+        if dnd.transfer_id() != id {
+            return Err(UnknownDataTransfer(id));
+        }
+
+        if dnd.accepted == Some(false) {
+            return Ok(());
+        }
+
+        dnd.accepted = Some(false);
+
+        let Some(source_window) = dnd.source_window else {
+            // TODO: Should have "other error" since this isn't an unknown data transfer.
+            return Err(UnknownDataTransfer(id));
+        };
+
+        let Some(window) = dnd.target_window else {
+            // TODO: Should have "other error" since this isn't an unknown data transfer.
+            return Err(UnknownDataTransfer(id));
+        };
+
+        unsafe {
+            dnd.send_status(window, source_window, DndState::Rejected)
+                .expect("Failed to send `XdndStatus` message.");
+        }
+        dnd.reset();
+
+        Ok(())
+    }
+
+    fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
+        let mut dnd = self.dnd.write().unwrap();
+        if dnd.transfer_id() != id {
+            return Err(UnknownDataTransfer(id));
+        }
+
+        if dnd.accepted == Some(true) {
+            return Ok(());
+        }
+
+        dnd.accepted = Some(true);
+
+        let Some(source_window) = dnd.source_window else {
+            // TODO: Should have "other error" since this isn't an unknown data transfer.
+            return Err(UnknownDataTransfer(id));
+        };
+
+        let Some(window) = dnd.target_window else {
+            // TODO: Should have "other error" since this isn't an unknown data transfer.
+            return Err(UnknownDataTransfer(id));
+        };
+
+        unsafe {
+            dnd.send_status(window, source_window, DndState::Accepted)
+                .expect("Failed to send `XdndStatus` message.");
+        }
+
+        Ok(())
+    }
 }
 
 impl rwh_06::HasDisplayHandle for Window {
@@ -413,10 +474,11 @@ unsafe impl Sync for UnownedWindow {}
 #[derive(Debug)]
 pub struct UnownedWindow {
     pub(crate) xconn: Arc<XConnection>, // never changes
-    xwindow: xproto::Window,            // never changes
+    dnd: Arc<RwLock<Dnd>>,
+    xwindow: xproto::Window, // never changes
     #[allow(dead_code)]
     visual: u32, // never changes
-    root: xproto::Window,               // never changes
+    root: xproto::Window,    // never changes
     #[allow(dead_code)]
     screen_id: i32, // never changes
     sync_counter_id: Option<NonZeroU32>, // never changes
@@ -638,9 +700,12 @@ impl UnownedWindow {
             .visual;
         }
 
+        let dnd = event_loop.dnd.clone();
+
         #[allow(clippy::mutex_atomic)]
         let mut window = UnownedWindow {
             xconn: Arc::clone(xconn),
+            dnd,
             xwindow: xwindow as xproto::Window,
             visual,
             root,

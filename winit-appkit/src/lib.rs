@@ -71,6 +71,7 @@ mod util;
 mod app;
 mod app_state;
 mod cursor;
+mod dnd;
 mod event;
 mod event_loop;
 mod ffi;

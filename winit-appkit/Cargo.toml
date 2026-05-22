@@ -46,6 +46,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSOpenGLView",
     "NSPanel",
     "NSPasteboard",
+    "NSPasteboardItem",
     "NSResponder",
     "NSRunningApplication",
     "NSScreen",

@@ -10,12 +10,13 @@ use objc2_app_kit::{NSPanel, NSResponder, NSWindow};
 use objc2_foundation::NSObject;
 use tracing::trace_span;
 use winit_core::cursor::Cursor;
+use winit_core::data_transfer::{DataTransferId, TransferType};
 use winit_core::error::RequestError;
 use winit_core::icon::Icon;
 use winit_core::monitor::{Fullscreen, MonitorHandle as CoreMonitorHandle};
 use winit_core::window::{
-    ImeCapabilities, ImeRequest, ImeRequestError, Theme, UserAttentionType, Window as CoreWindow,
-    WindowAttributes, WindowButtons, WindowId, WindowLevel,
+    ImeCapabilities, ImeRequest, ImeRequestError, Theme, UnknownDataTransfer, UserAttentionType,
+    Window as CoreWindow, WindowAttributes, WindowButtons, WindowId, WindowLevel,
 };
 
 use super::event_loop::ActiveEventLoop;
@@ -338,6 +339,22 @@ impl CoreWindow for Window {
 
     fn rwh_06_window_handle(&self) -> &dyn rwh_06::HasWindowHandle {
         self
+    }
+
+    fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
+        todo!()
+    }
+
+    fn accept_drag_type(
+        &self,
+        id: DataTransferId,
+        type_: &dyn TransferType,
+    ) -> Result<(), UnknownDataTransfer> {
+        todo!()
+    }
+
+    fn reject_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
+        todo!()
     }
 }
 

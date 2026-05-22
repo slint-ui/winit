@@ -2,8 +2,8 @@ use std::error::Error;
 
 use tracing::{error, info};
 use winit::application::ApplicationHandler;
-use winit::data_transfer::TypeHint;
-use winit::event::WindowEvent;
+use winit::data_transfer::{DataTransferId, TypeHint};
+use winit::event::{DataTransferEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, AsyncRequestSerial, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -23,6 +23,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[derive(Debug)]
 struct FetchState {
+    id: DataTransferId,
     serial: AsyncRequestSerial,
     type_: TypeHint,
     received: bool,
@@ -54,6 +55,10 @@ impl ApplicationHandler for Application {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+
         match event {
             WindowEvent::DragLeft { .. } => {
                 info!("{event:?}");
@@ -89,16 +94,7 @@ impl ApplicationHandler for Application {
 
                 self.last_dnd_fetch = None;
             },
-            WindowEvent::DataTransferResult { serial, .. } => {
-                info!("{event:?}");
-
-                if let Some(state) = &mut self.last_dnd_fetch
-                    && state.serial == serial
-                {
-                    state.received = true;
-                }
-            },
-            WindowEvent::DragEntered { id } => {
+            WindowEvent::DragEntered { id, .. } => {
                 info!("{event:?}");
 
                 let data_transfer = match event_loop.data_transfer(id) {
@@ -126,16 +122,16 @@ impl ApplicationHandler for Application {
                 info!("Supported types: {:#?}", wanted_types);
 
                 let Some(type_) = wanted_types.first().copied() else {
-                    event_loop.reject_drag(id).unwrap();
+                    window.reject_drag(id).unwrap();
                     return;
                 };
 
-                event_loop.accept_drag_type(id, &type_).unwrap();
+                window.accept_drag_type(id, &type_).unwrap();
 
                 self.last_dnd_fetch = event_loop
                     .fetch_data_transfer(id, &type_)
                     .ok()
-                    .map(|serial| FetchState { serial, type_, received: false });
+                    .map(|serial| FetchState { id, serial, type_, received: false });
             },
             WindowEvent::RedrawRequested => {
                 let window = self.window.as_ref().unwrap();
@@ -146,6 +142,24 @@ impl ApplicationHandler for Application {
                 event_loop.exit();
             },
             _ => {},
+        }
+    }
+
+    fn data_transfer_event(&mut self, _: &dyn ActiveEventLoop, event: DataTransferEvent) {
+        match event {
+            DataTransferEvent::Dropped { id } => {
+                if self.last_dnd_fetch.as_ref().is_some_and(|state| state.id == id) {
+                    self.last_dnd_fetch = None;
+                }
+            },
+            DataTransferEvent::FetchResult { id, serial } => {
+                if let Some(state) = &mut self.last_dnd_fetch
+                    && state.serial == serial
+                    && id == state.id
+                {
+                    state.received = true;
+                }
+            },
         }
     }
 }

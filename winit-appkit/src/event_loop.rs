@@ -17,10 +17,11 @@ use winit_common::core_foundation::{MainRunLoop, MainRunLoopObserver, tracing_ob
 use winit_common::foundation::create_observer;
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{CustomCursor as CoreCustomCursor, CustomCursorSource};
+use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypedData};
 use winit_core::error::{EventLoopError, RequestError};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents,
+    ActiveEventLoop as RootActiveEventLoop, AsyncRequestSerial, ControlFlow, DeviceEvents,
     EventLoopProxy as CoreEventLoopProxy, OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
@@ -125,6 +126,37 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
     fn rwh_06_handle(&self) -> &dyn rwh_06::HasDisplayHandle {
         self
+    }
+
+    fn fetch_data_transfer(
+        &self,
+        id: DataTransferId,
+        type_: &dyn TransferType,
+    ) -> Result<AsyncRequestSerial, RequestError> {
+        let Some(pb) = self.app_state.dnd().get(id) else {
+            return Err(RequestError::Ignored);
+        };
+
+        if !pb.has_type(type_) {
+            return Err(RequestError::Ignored);
+        }
+
+        // TODO: We can get rid of `DataTransferResult` entirely
+        Ok(todo!())
+    }
+
+    fn data_transfer_result(
+        &self,
+        serial: AsyncRequestSerial,
+    ) -> Result<Box<dyn TypedData>, RequestError> {
+        // TODO: We can get rid of `DataTransferResult` entirely, so this API should be redesigned
+        // to return a `TypedData` immediately from `fetch_data_transfer`.
+
+        todo!()
+    }
+
+    fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
+        todo!()
     }
 }
 

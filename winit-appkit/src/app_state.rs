@@ -18,10 +18,12 @@ use winit_core::window::WindowId;
 use super::event_loop::{ActiveEventLoop, notify_windows_of_exit, stop_app_immediately};
 use super::menu;
 use super::observer::EventLoopWaker;
+use crate::dnd::DndState;
 
 #[derive(Debug)]
 pub(super) struct AppState {
     mtm: MainThreadMarker,
+    dnd: DndState,
     activation_policy: Option<NSApplicationActivationPolicy>,
     default_menu: bool,
     activate_ignoring_other_apps: bool,
@@ -65,6 +67,7 @@ impl AppState {
 
         let this = Rc::new(Self {
             mtm,
+            dnd: Default::default(),
             activation_policy,
             default_menu,
             activate_ignoring_other_apps,
@@ -370,6 +373,10 @@ impl AppState {
             ControlFlow::WaitUntil(instant) => Some(instant),
         };
         self.waker.borrow_mut().start_at(min_timeout(wait_timeout, app_timeout));
+    }
+
+    pub fn dnd(&self) -> &DndState {
+        &self.dnd
     }
 }
 

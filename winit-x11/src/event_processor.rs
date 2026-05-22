@@ -462,7 +462,10 @@ impl EventProcessor {
                 dnd.transfer_id()
             };
 
-            app.window_event(&self.target, window_id, WindowEvent::DragEntered { id: transfer_id });
+            app.window_event(&self.target, window_id, WindowEvent::DragEntered {
+                id: transfer_id,
+                position: None,
+            });
             return;
         }
 

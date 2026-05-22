@@ -79,14 +79,25 @@ pub enum WindowEvent {
     DragEntered {
         /// Data transfer object specifying the ID and available types.
         id: DataTransferId,
+        /// (x,y) coordinates in pixels relative to the top-left corner of the window.
+        ///
+        /// May be negative on some platforms if something is dragged over a window's decorations
+        /// (title bar, frame, etc).
+        ///
+        /// Some platforms will provide this on enter, others do not. On most platforms, the
+        /// receiving application is expected to either accept or reject a drag-and-drop operation
+        /// immediately upon receiving `DragEntered`, so when possible it is provided here to make
+        /// that behavior easier to implement correctly.
+        position: Option<PhysicalPosition<f64>>,
     },
     /// A file drag operation has moved over the window.
     DragPosition {
         /// Data transfer object specifying the ID and available types.
         id: DataTransferId,
-        /// (x,y) coordinates in pixels relative to the top-left corner of the window. May be
-        /// negative on some platforms if something is dragged over a window's decorations (title
-        /// bar, frame, etc).
+        /// (x,y) coordinates in pixels relative to the top-left corner of the window.
+        ///
+        /// May be negative on some platforms if something is dragged over a window's decorations
+        /// (title bar, frame, etc).
         position: PhysicalPosition<f64>,
     },
     /// The file drag operation has dropped file(s) on the window.
@@ -99,9 +110,6 @@ pub enum WindowEvent {
         /// Data transfer object specifying the ID and available types.
         id: DataTransferId,
     },
-
-    /// The result of a data transfer is available.
-    DataTransferResult { id: DataTransferId, serial: AsyncRequestSerial },
 
     /// The window gained or lost focus.
     ///
@@ -613,6 +621,17 @@ impl FingerId {
     pub const fn from_raw(id: usize) -> Self {
         Self(id)
     }
+}
+
+// TODO: Remove this, `DataTransferResult` is only necessary for X11 and there's a workaround
+// implemented by Qt https://github.com/qt/qtbase/blob/dev/src/plugins/platforms/xcb/qxcbclipboard.cpp#L724
+pub enum DataTransferEvent {
+    // TODO: We should remove this event, but it would still be nice if we had a way to express
+    // this (probably in `ActiveEventLoop`).
+    Dropped { id: DataTransferId },
+
+    // TODO: Remove this
+    FetchResult { id: DataTransferId, serial: AsyncRequestSerial },
 }
 
 /// Represents raw hardware events that are not associated with any particular window.
@@ -1560,7 +1579,7 @@ mod tests {
             with_window_event(Focused(true));
             with_window_event(Moved((0, 0).into()));
             with_window_event(SurfaceResized((0, 0).into()));
-            with_window_event(DragEntered { id: dnd_data});
+            with_window_event(DragEntered { id: dnd_data, position: None });
             with_window_event(DragPosition { id: dnd_data, position: (0, 0).into() });
             with_window_event(DragDropped { id: dnd_data });
             with_window_event(DragLeft { id: dnd_data });

@@ -106,7 +106,7 @@ pub enum TypeHint {
 ///
 /// [`hint`](TransferType::hint) can be called to get the type in
 /// a cross-platform format (see [`TypeHint`])
-pub trait TransferType: AsAny + Send + Sync + fmt::Debug {
+pub trait TransferType: AsAny + fmt::Debug {
     /// Get the cross-platform representation of this type.
     ///
     /// If this returns `None`, then this is a platform-dependent type that has no cross-platform
@@ -120,10 +120,16 @@ impl TransferType for TypeHint {
     }
 }
 
+impl TransferType for Option<TypeHint> {
+    fn hint(&self) -> Option<TypeHint> {
+        *self
+    }
+}
+
 impl_dyn_casting!(TransferType);
 
 /// Data that has been fetched from a data transfer
-pub trait TypedData: AsAny + Send + Sync + fmt::Debug {
+pub trait TypedData: AsAny + fmt::Debug {
     /// The type of this `TypedData`.
     fn type_(&self) -> &dyn TransferType;
 
@@ -150,7 +156,7 @@ impl_dyn_casting!(TypedData);
 /// asynchronous operation. To fetch the data from the source application, see
 /// [`Window::fetch_data_transfer`](crate::window::Window::fetch_data_transfer)
 /// and [`WindowEvent::DataTransferResult`](crate::event::WindowEvent::DataTransferResult).
-pub trait DataTransfer: AsAny + Send + Sync + fmt::Debug {
+pub trait DataTransfer: AsAny + fmt::Debug {
     /// Display the list of all available types.
     ///
     /// This is useful if more-complex type matching is required, but for most cases

@@ -773,67 +773,6 @@ impl RootActiveEventLoop for ActiveEventLoop {
         Ok(Box::new(Selection::new(self.dnd.clone())))
     }
 
-    fn reject_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
-        let mut dnd = self.dnd.write().unwrap();
-        if dnd.transfer_id() != id {
-            return Err(UnknownDataTransfer(id));
-        }
-
-        if dnd.accepted == Some(false) {
-            return Ok(());
-        }
-
-        dnd.accepted = Some(false);
-
-        let Some(source_window) = dnd.source_window else {
-            // TODO: Should have "other error" since this isn't an unknown data transfer.
-            return Err(UnknownDataTransfer(id));
-        };
-
-        let Some(window) = dnd.target_window else {
-            // TODO: Should have "other error" since this isn't an unknown data transfer.
-            return Err(UnknownDataTransfer(id));
-        };
-
-        unsafe {
-            dnd.send_status(window, source_window, DndState::Rejected)
-                .expect("Failed to send `XdndStatus` message.");
-        }
-        dnd.reset();
-
-        Ok(())
-    }
-
-    fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
-        let mut dnd = self.dnd.write().unwrap();
-        if dnd.transfer_id() != id {
-            return Err(UnknownDataTransfer(id));
-        }
-
-        if dnd.accepted == Some(true) {
-            return Ok(());
-        }
-
-        dnd.accepted = Some(true);
-
-        let Some(source_window) = dnd.source_window else {
-            // TODO: Should have "other error" since this isn't an unknown data transfer.
-            return Err(UnknownDataTransfer(id));
-        };
-
-        let Some(window) = dnd.target_window else {
-            // TODO: Should have "other error" since this isn't an unknown data transfer.
-            return Err(UnknownDataTransfer(id));
-        };
-
-        unsafe {
-            dnd.send_status(window, source_window, DndState::Accepted)
-                .expect("Failed to send `XdndStatus` message.");
-        }
-
-        Ok(())
-    }
-
     fn fetch_data_transfer(
         &self,
         id: DataTransferId,
