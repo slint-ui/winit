@@ -61,15 +61,20 @@ use super::monitor::{self, MonitorHandle, flip_window_screen_coordinates, get_di
 use super::util::cgerr;
 use super::view::WinitView;
 use super::window::{WinitPanel, WinitWindow, window_id};
-use crate::dnd::Pasteboard;
 use crate::{OptionAsAlt, WindowAttributesMacOS, WindowExtMacOS};
+
+#[derive(Copy, Clone, Debug)]
+struct DragState {
+    id: DataTransferId,
+    accepted: bool,
+}
 
 #[derive(Debug)]
 pub(crate) struct State {
     /// Strong reference to the global application state.
     app_state: Rc<AppState>,
 
-    drag_state: Cell<Option<DataTransferId>>,
+    drag_state: Cell<Option<DragState>>,
 
     window: Retained<NSWindow>,
 
@@ -376,14 +381,14 @@ define_class!(
 
             let vars = self.ivars();
 
-            let transfer_id = vars.app_state.dnd().insert(pb);
+            let transfer_id = vars.app_state.dnd().insert(&pb);
             self.queue_event(WindowEvent::DragEntered {
                 id: transfer_id,
                 position: Some(position),
             });
 
-            vars.drag_state.set(Some(transfer_id));
-            true
+            vars.drag_state.set(Some(DragState { id: transfer_id, accepted: false }));
+            false
         }
 
         #[unsafe(method(wantsPeriodicDraggingUpdates))]
@@ -400,13 +405,13 @@ define_class!(
 
             let vars = self.ivars();
 
-            let Some(transfer_id) = vars.drag_state.get() else {
+            let Some(DragState { id: transfer_id, accepted }) = vars.drag_state.get() else {
                 return false.into();
             };
 
             let pb = sender.draggingPasteboard();
 
-            vars.app_state.dnd().set_pasteboard(transfer_id, pb);
+            vars.app_state.dnd().set_pasteboard(transfer_id, &pb);
 
             let dl = sender.draggingLocation();
             let dl = self.view().convertPoint_fromView(dl, None);
@@ -415,7 +420,7 @@ define_class!(
 
             self.queue_event(WindowEvent::DragPosition { id: transfer_id, position });
 
-            true
+            accepted
         }
 
         /// Invoked when the image is released
@@ -432,14 +437,14 @@ define_class!(
 
             let vars = self.ivars();
 
-            let Some(transfer_id) = vars.drag_state.get() else {
+            let Some(DragState { id: transfer_id, accepted }) = vars.drag_state.get() else {
                 return false.into();
             };
 
             let pb = sender.draggingPasteboard();
 
             let transfer_id = transfer_id;
-            vars.app_state.dnd().set_pasteboard(transfer_id, pb);
+            vars.app_state.dnd().set_pasteboard(transfer_id, &pb);
 
             let dl = sender.draggingLocation();
             let dl = self.view().convertPoint_fromView(dl, None);
@@ -449,7 +454,7 @@ define_class!(
             self.queue_event(WindowEvent::DragPosition { id: transfer_id, position });
             self.queue_event(WindowEvent::DragDropped { id: transfer_id });
 
-            true
+            accepted
         }
 
         /// Invoked when the dragging operation is complete
@@ -458,10 +463,8 @@ define_class!(
             let _entered = debug_span!("concludeDragOperation:").entered();
             let vars = self.ivars();
 
-            if let Some(transfer_id) = vars.drag_state.get() {
-                vars.app_state.dnd().remove(transfer_id);
-                vars.drag_state.set(None);
-            }
+            vars.app_state.dnd().remove_deloaded_pasteboards();
+            vars.drag_state.set(None);
         }
 
         /// Invoked when the dragging operation is cancelled
@@ -470,13 +473,13 @@ define_class!(
             let _entered = debug_span!("draggingExited:").entered();
 
             let vars = self.ivars();
-            let Some(transfer_id) = vars.drag_state.get() else {
+            let Some(DragState { id: transfer_id, accepted: _ }) = vars.drag_state.get() else {
                 return;
             };
 
             if let Some(sender) = sender {
                 let pb = sender.draggingPasteboard();
-                vars.app_state.dnd().set_pasteboard(transfer_id, pb);
+                vars.app_state.dnd().set_pasteboard(transfer_id, &pb);
 
                 let dl = sender.draggingLocation();
                 let dl = self.view().convertPoint_fromView(dl, None);
@@ -488,10 +491,7 @@ define_class!(
 
             self.queue_event(WindowEvent::DragLeft { id: transfer_id });
 
-            if let Some(transfer_id) = vars.drag_state.get() {
-                vars.app_state.dnd().remove(transfer_id);
-                vars.drag_state.set(None);
-            }
+            vars.drag_state.set(None);
         }
     }
 
@@ -907,6 +907,26 @@ impl WindowDelegate {
         }
 
         Ok(delegate)
+    }
+
+    // TODO: Proper error
+    pub(super) fn set_drag_accepted(
+        &self,
+        transfer_id: DataTransferId,
+        accepted: bool,
+    ) -> Result<(), ()> {
+        let vars = self.ivars();
+        let Some(DragState { id, accepted: _ }) = vars.drag_state.get() else {
+            return Err(());
+        };
+
+        if id != transfer_id {
+            return Err(());
+        }
+
+        vars.drag_state.set(Some(DragState { id, accepted }));
+
+        Ok(())
     }
 
     #[track_caller]

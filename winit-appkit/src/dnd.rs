@@ -5,7 +5,7 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use objc2::Message;
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak};
 use objc2_app_kit::{
     NSPasteboard, NSPasteboardType, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
     NSPasteboardTypePNG, NSPasteboardTypeSound, NSPasteboardTypeString, NSPasteboardTypeTIFF,
@@ -93,32 +93,13 @@ impl Deref for Pasteboard {
     }
 }
 
-static TRANSFER_ID: AtomicI64 = AtomicI64::new(0);
-
-impl From<Retained<NSPasteboard>> for Pasteboard {
-    fn from(value: Retained<NSPasteboard>) -> Self {
-        Self::new(value)
-    }
-}
-
 impl Pasteboard {
-    pub fn new(inner: Retained<NSPasteboard>) -> Self {
-        Self {
-            transfer_id: DataTransferId::from_raw(TRANSFER_ID.fetch_and(1, Ordering::Relaxed)),
-            inner,
-        }
-    }
-
     pub(crate) fn set_pasteboard(&mut self, pasteboard: Retained<NSPasteboard>) {
         self.inner = pasteboard;
     }
 
     pub fn id(&self) -> DataTransferId {
         self.transfer_id
-    }
-
-    pub fn data_by_type(&self, type_: &PasteboardType) -> Option<()> {
-        todo!()
     }
 }
 
@@ -218,7 +199,7 @@ impl TypedData for PasteboardValue {
         }
     }
 
-    fn try_read(&mut self) -> Option<Box<dyn std::io::BufRead + '_>> {
+    fn try_read(&mut self) -> Option<Box<dyn std::io::BufRead>> {
         struct DataReader {
             inner: Retained<NSData>,
             offset: usize,
@@ -260,9 +241,9 @@ impl TypedData for PasteboardValue {
             .map(|data| Box::new(DataReader::new(data)) as _)
     }
 
-    fn try_as_uris(&mut self) -> Option<Vec<String>> {
+    fn try_as_uris(&mut self) -> io::Result<Vec<String>> {
         if self.type_().hint() != Some(TypeHint::UriList) {
-            return None;
+            return Err(io::ErrorKind::InvalidData.into());
         }
 
         let Some(items) = self.inner.pasteboardItems() else {
@@ -273,7 +254,12 @@ impl TypedData for PasteboardValue {
                 .propertyListForType(unsafe { objc2_app_kit::NSFilenamesPboardType })
             {
                 Some(property_list) => property_list,
-                None => return self.single_file_url().map(|str| vec![str]),
+                None => {
+                    return self
+                        .single_file_url()
+                        .map(|str| vec![str])
+                        .ok_or_else(|| io::ErrorKind::InvalidData.into());
+                },
             };
 
             let paths = property_list
@@ -283,64 +269,63 @@ impl TypedData for PasteboardValue {
                 .map(|file| file.downcast::<NSString>().unwrap().to_string())
                 .collect();
 
-            return Some(paths);
+            return Ok(paths);
         };
 
-        Some(
-            items
-                .into_iter()
-                .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
-                .map(|ns_str| ns_str.to_string())
-                .collect(),
-        )
+        Ok(items
+            .into_iter()
+            .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
+            .map(|ns_str| ns_str.to_string())
+            .collect())
     }
 
-    fn try_as_string(&mut self) -> Option<String> {
-        self.inner.stringForType(self.type_.pasteboard_type()?).map(|ns_str| ns_str.to_string())
+    fn try_as_string(&mut self) -> io::Result<String> {
+        self.inner
+            .stringForType(self.type_.pasteboard_type().ok_or(io::ErrorKind::InvalidData)?)
+            .map(|ns_str| ns_str.to_string())
+            .ok_or_else(|| io::ErrorKind::InvalidData.into())
+    }
+
+    fn wait_for_data(&self) -> io::Result<()> {
+        // The methods on `NSPasteboard` already wait without danger of deadlock
+        Ok(())
     }
 }
 
 #[derive(Debug, Default)]
 pub struct DndState {
-    inner: RefCell<HashMap<DataTransferId, Pasteboard>>,
-    serial_to_id: RefCell<HashMap<AsyncRequestSerial, PasteboardValue>>,
+    inner: RefCell<HashMap<DataTransferId, Weak<NSPasteboard>>>,
 }
 
 impl DndState {
-    pub fn set_pasteboard(&self, id: DataTransferId, pb: Retained<NSPasteboard>) {
+    pub fn remove_deloaded_pasteboards(&self) {
+        self.inner.borrow_mut().retain(|_, v| v.load().is_some());
+    }
+
+    /// If the data transfer exists, update the pasteboard it points to.
+    pub fn set_pasteboard(&self, id: DataTransferId, pb: &Retained<NSPasteboard>) {
         let mut inner = self.inner.borrow_mut();
         if let Some(state) = inner.get_mut(&id) {
-            state.inner = pb;
+            *state = Weak::from_retained(pb);
         }
     }
 
-    pub fn insert<P>(&self, pb: P) -> DataTransferId
-    where
-        P: Into<Pasteboard>,
-    {
-        let value = pb.into();
-        let id = value.id();
+    pub fn insert(&self, pb: &Retained<NSPasteboard>) -> DataTransferId {
+        static TRANSFER_ID: AtomicI64 = AtomicI64::new(0);
 
-        self.inner.borrow_mut().insert(id, value);
+        let id = TRANSFER_ID.fetch_add(1, Ordering::Relaxed);
+        let id = DataTransferId::from_raw(id);
+
+        self.inner.borrow_mut().insert(id, Weak::from_retained(pb));
 
         id
     }
 
-    pub fn remove(&self, id: DataTransferId) {
-        if self.inner.borrow_mut().remove(&id).is_none() {
-            return;
-        }
-
-        self.serial_to_id.borrow_mut().retain(|_, value| value.inner.id() != id);
-    }
-
     pub fn get(&self, id: DataTransferId) -> Option<Pasteboard> {
-        self.inner.borrow().get(&id).cloned()
-    }
-
-    pub fn fetch_type(&self, type_: &dyn TransferType) -> AsyncRequestSerial {
-        let out = AsyncRequestSerial::get();
-        // TODO: Remove `DataTransferResult`
-        todo!()
+        self.inner
+            .borrow()
+            .get(&id)
+            .and_then(|weak| weak.load())
+            .map(|pb| Pasteboard { transfer_id: id, inner: pb })
     }
 }

@@ -144,7 +144,7 @@ pub trait TypedData: AsAny + fmt::Debug {
     fn type_(&self) -> &dyn TransferType;
 
     /// If this value is readable as bytes, return a reader than can be used to read those bytes.
-    fn try_read(&mut self) -> Option<Box<dyn io::BufRead + Send>>;
+    fn try_read(&mut self) -> Option<Box<dyn io::BufRead>>;
 
     /// Read this value as a list of URIs.
     ///

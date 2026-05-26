@@ -342,19 +342,13 @@ impl CoreWindow for Window {
     }
 
     fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
-        todo!()
-    }
-
-    fn accept_drag_type(
-        &self,
-        id: DataTransferId,
-        type_: &dyn TransferType,
-    ) -> Result<(), UnknownDataTransfer> {
-        todo!()
+        self.maybe_wait_on_main(|delegate| delegate.set_drag_accepted(id, true))
+            .map_err(|()| UnknownDataTransfer(id))
     }
 
     fn reject_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
-        todo!()
+        self.maybe_wait_on_main(|delegate| delegate.set_drag_accepted(id, false))
+            .map_err(|()| UnknownDataTransfer(id))
     }
 }
 

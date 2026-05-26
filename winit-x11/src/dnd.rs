@@ -218,7 +218,7 @@ impl SelectionReader {
 }
 
 impl TypedData for SelectionReader {
-    fn try_read(&mut self) -> Option<Box<dyn io::BufRead + Send>> {
+    fn try_read(&mut self) -> Option<Box<dyn io::BufRead>> {
         Some(Box::new(self.clone()))
     }
 

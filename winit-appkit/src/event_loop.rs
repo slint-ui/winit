@@ -21,7 +21,7 @@ use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, Type
 use winit_core::error::{EventLoopError, RequestError};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, AsyncRequestSerial, ControlFlow, DeviceEvents,
+    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents,
     EventLoopProxy as CoreEventLoopProxy, OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
@@ -132,7 +132,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
         &self,
         id: DataTransferId,
         type_: &dyn TransferType,
-    ) -> Result<AsyncRequestSerial, RequestError> {
+    ) -> Result<Box<dyn TypedData>, RequestError> {
         let Some(pb) = self.app_state.dnd().get(id) else {
             return Err(RequestError::Ignored);
         };
@@ -141,18 +141,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
             return Err(RequestError::Ignored);
         }
 
-        // TODO: We can get rid of `DataTransferResult` entirely
         Ok(todo!())
-    }
-
-    fn data_transfer_result(
-        &self,
-        serial: AsyncRequestSerial,
-    ) -> Result<Box<dyn TypedData>, RequestError> {
-        // TODO: We can get rid of `DataTransferResult` entirely, so this API should be redesigned
-        // to return a `TypedData` immediately from `fetch_data_transfer`.
-
-        todo!()
     }
 
     fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
