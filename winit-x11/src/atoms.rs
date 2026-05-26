@@ -13,7 +13,7 @@ macro_rules! atom_manager {
 
         /// Indices into the `Atoms` struct.
         #[derive(Copy, Clone, Debug)]
-        #[allow(non_camel_case_types)]
+        #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
         pub enum AtomName {
             $($name,)*
         }

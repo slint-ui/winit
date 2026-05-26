@@ -451,7 +451,7 @@ impl EventProcessor {
                         xev.data.get_long(3) as xproto::Atom,
                         xev.data.get_long(4) as xproto::Atom,
                     ]
-                    .map(|ty_atom| SelectionType::new(atoms, ty_atom).into())
+                    .map(|ty_atom| SelectionType::new(atoms, ty_atom))
                     .into_iter()
                     .collect();
                     dnd.types = Some(type_list);
@@ -459,7 +459,7 @@ impl EventProcessor {
                     dnd.types = Some(
                         more_types
                             .into_iter()
-                            .map(|ty_atom| SelectionType::new(atoms, ty_atom).into())
+                            .map(|ty_atom| SelectionType::new(atoms, ty_atom))
                             .collect(),
                     );
                 }

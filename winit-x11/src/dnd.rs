@@ -217,7 +217,7 @@ impl SelectionReader {
     {
         let data = self.data.try_data()?;
 
-        let mut cursor = io::Cursor::new(&data[..]);
+        let mut cursor = io::Cursor::new(data);
         cursor.set_position(self.pos);
         let result = func(&mut cursor)?;
         let new_pos = cursor.position();
@@ -247,7 +247,6 @@ impl TypedData for SelectionReader {
         fn decode_utf16_bytes(bytes: &[u8]) -> io::Result<String> {
             let utf16 = bytes
                 .chunks_exact(2)
-                .into_iter()
                 .map(|chunk| {
                     let bytes: &[u8; 2] = chunk.try_into().unwrap();
                     u16::from_ne_bytes(*bytes)
@@ -295,7 +294,7 @@ impl TypedData for SelectionReader {
 
         Ok(self
             .try_as_string()?
-            .split(|c| c == '\n' || c == '\r')
+            .split(['\n', '\r'])
             .filter(|s| !s.is_empty())
             .map(Into::into)
             .collect())
@@ -358,7 +357,7 @@ impl Selection {
     }
 }
 
-#[derive(Clone, Debug, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SelectionType {
     hint: Option<TypeHint>,
     atom: xproto::Atom,
@@ -415,15 +414,9 @@ impl SelectionType {
     }
 }
 
-impl PartialEq for SelectionType {
-    fn eq(&self, other: &Self) -> bool {
-        self.atom == other.atom
-    }
-}
-
 impl TransferType for SelectionType {
     fn hint(&self) -> Option<TypeHint> {
-        self.hint.clone()
+        self.hint
     }
 }
 
