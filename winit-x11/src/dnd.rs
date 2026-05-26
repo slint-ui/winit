@@ -110,6 +110,18 @@ impl SharedDataReader {
         self.reader.try_data()
     }
 
+    #[rustversion::since(1.86)]
+    fn wait_internal(&self) -> io::Result<()> {
+        let _ = self.reader.data.wait();
+
+        Ok(())
+    }
+
+    #[rustversion::before(1.86)]
+    fn wait_internal(&self) -> io::Result<()> {
+        if self.reader.has_data() { Ok(()) } else { Err(io::ErrorKind::WouldBlock.into()) }
+    }
+
     fn wait_for_data(&self) -> io::Result<()> {
         if !self.reader.has_data()
             && self.deadlock_sentinel.get() == Some(std::thread::current().id())
@@ -117,9 +129,7 @@ impl SharedDataReader {
             return Err(io::ErrorKind::Deadlock.into());
         }
 
-        let _ = self.reader.data.wait();
-
-        Ok(())
+        self.wait_internal()
     }
 }
 
@@ -258,10 +268,12 @@ impl TypedData for SelectionReader {
                     decode_utf16_bytes(data)
                         // Even if we guess that it's utf-16, we'll still try utf-8 just in case
                         .or_else(|_| {
-                            str::from_utf8(data).map(|str| str.to_owned()).map_err(invalid_data)
+                            std::str::from_utf8(data)
+                                .map(|str| str.to_owned())
+                                .map_err(invalid_data)
                         })
                 } else {
-                    str::from_utf8(data)
+                    std::str::from_utf8(data)
                         .map(|str| str.to_owned())
                         .map_err(invalid_data)
                         .or_else(|_| decode_utf16_bytes(data))

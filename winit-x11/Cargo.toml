@@ -20,6 +20,7 @@ serde = { workspace = true, optional = true }
 smol_str.workspace = true
 tracing.workspace = true
 winit-core.workspace = true
+rustversion.workspace = true
 
 # Platform-specific
 bytemuck.workspace = true
