@@ -779,10 +779,6 @@ fn new_window(
             window.setBackgroundColor(Some(&NSColor::clearColor()));
         }
 
-        // register for drag and drop operations.
-        #[allow(deprecated)]
-        window.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSFilenamesPboardType }]));
-
         Some(window)
     })
 }
@@ -862,6 +858,10 @@ impl WindowDelegate {
         window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
 
         let drag_types = unsafe {
+            // Advertize support for the set of types which correspond to variants of `TypeHint`.
+            // If the user wants to support other pasteboard types which don't have a cross-platform
+            // equivalent, they can downcast the window and manually call `registerForDraggedTypes`
+            // themselves.
             NSArray::from_slice(&[
                 NSPasteboardTypeFileURL,
                 NSPasteboardTypeHTML,
