@@ -19,11 +19,12 @@ use objc2::{
 use objc2_app_kit::{
     NSAppKitVersionNumber, NSAppKitVersionNumber10_12, NSAppearance, NSAppearanceCustomization,
     NSAppearanceNameAqua, NSApplication, NSApplicationPresentationOptions, NSBackingStoreType,
-    NSColor, NSDraggingDestination, NSDraggingInfo, NSRequestUserAttentionType, NSScreen,
-    NSToolbar, NSView, NSViewFrameDidChangeNotification, NSWindow, NSWindowButton,
-    NSWindowDelegate, NSWindowLevel, NSWindowOcclusionState, NSWindowOrderingMode,
-    NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
-    NSWindowToolbarStyle,
+    NSColor, NSDraggingDestination, NSDraggingInfo, NSPasteboardTypeColor, NSPasteboardTypeFileURL,
+    NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeSound, NSPasteboardTypeString,
+    NSPasteboardTypeTIFF, NSRequestUserAttentionType, NSScreen, NSToolbar, NSView,
+    NSViewFrameDidChangeNotification, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowLevel,
+    NSWindowOcclusionState, NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask,
+    NSWindowTabbingMode, NSWindowTitleVisibility, NSWindowToolbarStyle,
 };
 #[allow(deprecated)]
 use objc2_app_kit::{NSFilenamesPboardType, NSWindowFullScreenButton};
@@ -382,12 +383,13 @@ define_class!(
             let vars = self.ivars();
 
             let transfer_id = vars.app_state.dnd().insert(&pb);
+            vars.drag_state.set(Some(DragState { id: transfer_id, accepted: false }));
+
             self.queue_event(WindowEvent::DragEntered {
                 id: transfer_id,
                 position: Some(position),
             });
 
-            vars.drag_state.set(Some(DragState { id: transfer_id, accepted: false }));
             false
         }
 
@@ -859,6 +861,18 @@ impl WindowDelegate {
         let delegate: Retained<WindowDelegate> = unsafe { msg_send![super(delegate), init] };
 
         window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+
+        let drag_types = unsafe {
+            NSArray::from_slice(&[
+                NSPasteboardTypeFileURL,
+                NSPasteboardTypeHTML,
+                NSPasteboardTypePNG,
+                NSPasteboardTypeSound,
+                NSPasteboardTypeString,
+                NSPasteboardTypeTIFF,
+            ])
+        };
+        window.registerForDraggedTypes(&drag_types);
 
         // Listen for theme change event.
         //

@@ -101,6 +101,17 @@ impl Pasteboard {
     pub fn id(&self) -> DataTransferId {
         self.transfer_id
     }
+
+    pub fn with_type(&self, dyn_type: &dyn TransferType) -> Option<PasteboardValue> {
+        if self.has_type(dyn_type) {
+            Some(PasteboardValue {
+                type_: PasteboardTypeSpec::from_dyn(dyn_type)?,
+                inner: self.clone(),
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl DataTransfer for Pasteboard {
@@ -189,8 +200,6 @@ impl Deref for PasteboardValue {
     }
 }
 
-static NO_TYPE_HINT: Option<TypeHint> = None;
-
 impl TypedData for PasteboardValue {
     fn type_(&self) -> &dyn TransferType {
         match &self.type_ {
@@ -242,6 +251,7 @@ impl TypedData for PasteboardValue {
     }
 
     fn try_as_uris(&mut self) -> io::Result<Vec<String>> {
+        // TODO: We should probably use `readObjects`, need to check how that works.
         if self.type_().hint() != Some(TypeHint::UriList) {
             return Err(io::ErrorKind::InvalidData.into());
         }

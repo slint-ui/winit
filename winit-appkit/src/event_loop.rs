@@ -137,15 +137,15 @@ impl RootActiveEventLoop for ActiveEventLoop {
             return Err(RequestError::Ignored);
         };
 
-        if !pb.has_type(type_) {
-            return Err(RequestError::Ignored);
-        }
-
-        Ok(todo!())
+        pb.with_type(type_).map(|value| Box::new(value) as _).ok_or(RequestError::Ignored)
     }
 
     fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
-        todo!()
+        let Some(pb) = self.app_state.dnd().get(id) else {
+            return Err(RequestError::Ignored);
+        };
+
+        Ok(Box::new(pb))
     }
 }
 
