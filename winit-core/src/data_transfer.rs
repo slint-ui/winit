@@ -69,7 +69,7 @@ impl DataTransferId {
 }
 
 /// The set of types supported cross-platform.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum TypeHint {
     /// Plain UTF-8 text (see [`TypedData::try_as_plaintext`]).
     ///
@@ -129,12 +129,22 @@ impl TransferType for Option<TypeHint> {
 impl_dyn_casting!(TransferType);
 
 /// Data that has been fetched from a data transfer
+///
+/// ### Blocking
+///
+/// Note that, in general, this type provides a _non-blocking_ interface. This means that the reader
+/// provided by [`try_read`](TypedData::try_read), as well other methods returning [`io::Result`],
+/// may return an error with [`io::ErrorKind::WouldBlock`]. To ensure that the `TypedData` is ready
+/// to read, the user may call [`wait_for_data`](TypedData::wait). This will block the current
+/// thread until the data is ready to read without returning `WouldBlock`. **This should not be
+/// called on the event handling thread**, as platforms may need to wait on OS events to populate
+/// the data.
 pub trait TypedData: AsAny + fmt::Debug {
     /// The type of this `TypedData`.
     fn type_(&self) -> &dyn TransferType;
 
     /// If this value is readable as bytes, return a reader than can be used to read those bytes.
-    fn try_read(&mut self) -> Option<Box<dyn io::BufRead + '_>>;
+    fn try_read(&mut self) -> Option<Box<dyn io::BufRead + Send>>;
 
     /// Read this value as a list of URIs.
     ///
@@ -142,12 +152,22 @@ pub trait TypedData: AsAny + fmt::Debug {
     ///
     /// The format of the returned URIs is simply a vector of strings. No validation is done
     /// to ensure that the URIs are valid or in the format
-    fn try_as_uris(&mut self) -> Option<Vec<String>>;
+    fn try_as_uris(&mut self) -> io::Result<Vec<String>>;
 
     /// Read this value as a plain text string.
     ///
     /// If this value is not readable as a string, return `None`.
-    fn try_as_string(&mut self) -> Option<String>;
+    fn try_as_string(&mut self) -> io::Result<String>;
+
+    /// Block the current thread until the data is fully available, or until the data is
+    /// invalidated.
+    ///
+    /// Note that this doesn't mean that other methods will return `Ok`, simply that they won't
+    /// return `io::Error::WouldBlock`.
+    ///
+    /// If the data is ready to be read, return `Ok(())`. If this data has been invalidated (and
+    /// therefore this would wait forever), return `Err`.
+    fn wait_for_data(&self) -> io::Result<()>;
 }
 
 impl_dyn_casting!(TypedData);

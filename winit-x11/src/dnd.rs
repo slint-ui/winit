@@ -1,12 +1,13 @@
+use std::cell::Cell;
 use std::io;
+use std::marker::PhantomData;
 use std::os::raw::*;
-use std::path::{Path, PathBuf};
 use std::str::Utf8Error;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
+use std::thread::ThreadId;
 
 use percent_encoding::percent_decode;
 use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypeHint, TypedData};
-use winit_core::event_loop::AsyncRequestSerial;
 use x11rb::protocol::xproto::{self, ConnectionExt};
 
 use crate::atoms::AtomName::None as DndNone;
@@ -28,6 +29,7 @@ pub enum UriListParseError {
     HostnameSpecified(#[allow(dead_code)] String),
     UnexpectedProtocol(#[allow(dead_code)] String),
     UnresolvablePath(#[allow(dead_code)] io::Error),
+    Io(#[allow(dead_code)] io::Error),
 }
 
 impl From<Utf8Error> for UriListParseError {
@@ -42,58 +44,197 @@ impl From<io::Error> for UriListParseError {
     }
 }
 
+// When `thread_id_value` is stabilized, this can become `AtomicU64`.
+#[derive(Default, Debug)]
+pub struct DeadlockSentinel(Arc<RwLock<Option<ThreadId>>>);
+
+/// Read-side of `DeadlockSentinel` (to prevent accidentally guarding in a re-entrant way).
+#[derive(Debug, Clone)]
+pub struct DeadlockSentinelReader(Arc<RwLock<Option<ThreadId>>>);
+
+impl DeadlockSentinelReader {
+    fn get(&self) -> Option<ThreadId> {
+        *self.0.read().unwrap()
+    }
+}
+
+#[must_use]
+#[derive(Debug)]
+pub struct DeadlockSentinelGuard(Arc<RwLock<Option<ThreadId>>>);
+
+impl Drop for DeadlockSentinelGuard {
+    fn drop(&mut self) {
+        *self.0.write().unwrap() = None;
+    }
+}
+
+impl DeadlockSentinel {
+    pub fn guard(&self) -> DeadlockSentinelGuard {
+        let mut writer = self.0.write().unwrap();
+        assert!(writer.is_none(), "Internal error: re-entrant `DeadlockSentinelGuard`");
+        *writer = Some(std::thread::current().id());
+        DeadlockSentinelGuard(self.0.clone())
+    }
+
+    pub fn reader(&self) -> DeadlockSentinelReader {
+        DeadlockSentinelReader(self.0.clone())
+    }
+}
+
+#[derive(Debug, Default)]
+struct SharedDataInnerState {
+    data: OnceLock<Result<Box<[c_uchar]>, io::ErrorKind>>,
+}
+
+impl SharedDataInnerState {
+    fn has_data(&self) -> bool {
+        self.data.get().is_some()
+    }
+
+    fn try_data(&self) -> io::Result<&[u8]> {
+        self.data
+            .get()
+            .map(|data| data.as_ref().map(|data| &**data).map_err(|err| io::Error::from(*err)))
+            .ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))?
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SharedDataReader {
+    reader: Arc<SharedDataInnerState>,
+    deadlock_sentinel: DeadlockSentinelReader,
+}
+
+impl SharedDataReader {
+    fn try_data(&self) -> io::Result<&[u8]> {
+        self.reader.try_data()
+    }
+
+    fn wait_for_data(&self) -> io::Result<()> {
+        if !self.reader.has_data()
+            && self.deadlock_sentinel.get() == Some(std::thread::current().id())
+        {
+            return Err(io::ErrorKind::Deadlock.into());
+        }
+
+        let _ = self.reader.data.wait();
+
+        Ok(())
+    }
+}
+
+type NonSyncMarker = PhantomData<Cell<()>>;
+
+#[derive(Debug, Default)]
+pub(crate) struct SharedDataWriter {
+    writer: Arc<SharedDataInnerState>,
+    _non_sync: NonSyncMarker,
+}
+
+impl SharedDataWriter {
+    fn reader(&self, deadlock_sentinel: DeadlockSentinelReader) -> SharedDataReader {
+        SharedDataReader { reader: self.writer.clone(), deadlock_sentinel }
+    }
+
+    pub(crate) fn write(&self, value: Box<[c_uchar]>) -> Result<(), Box<[c_uchar]>> {
+        // We know that we just passed `Ok`, so we can unwrap here.
+        self.writer.data.set(Ok(value)).map_err(|result| result.unwrap())
+    }
+}
+
+impl Drop for SharedDataWriter {
+    fn drop(&mut self) {
+        // Prevent `SelectionReader::wait_for_data` from deadlocking.
+        let _ = self.writer.data.set(Err(io::ErrorKind::BrokenPipe));
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SelectionReader {
     type_: SelectionType,
-    data: Arc<[c_uchar]>,
+    data: SharedDataReader,
+    pos: u64,
+}
+
+impl io::Read for SelectionReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.with_cursor(|cursor| cursor.read(buf))
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        self.with_cursor(|cursor| cursor.read_to_end(buf))
+    }
+
+    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
+        self.with_cursor(|cursor| cursor.read_to_string(buf))
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        self.with_cursor(|cursor| cursor.read_exact(buf))
+    }
+}
+
+impl io::BufRead for SelectionReader {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        // `io::Cursor::split` takes `&self` instead of `self`, so we need to reimplement it here.
+        let data = self.data.try_data()?;
+
+        Ok(&data[self.pos.min(data.len() as u64) as usize..])
+    }
+
+    fn consume(&mut self, amount: usize) {
+        // `io::Cursor::consume` doesn't require a buffer, so we skip the `try_data` check implied
+        // by `with_cursor`.
+        self.pos += amount as u64;
+    }
+
+    fn read_line(&mut self, buf: &mut String) -> io::Result<usize> {
+        self.with_cursor(|cursor| cursor.read_line(buf))
+    }
 }
 
 impl SelectionReader {
-    pub(crate) fn new(type_: SelectionType, data: Arc<[c_uchar]>) -> Self {
-        Self { type_, data }
+    pub(crate) fn new(type_: SelectionType, data: SharedDataReader) -> Self {
+        Self { type_, data, pos: 0 }
     }
 
-    pub fn parse_path_list(&self) -> Result<Vec<PathBuf>, UriListParseError> {
-        if !self.data.is_empty() {
-            let mut path_list = Vec::new();
-            let decoded = percent_decode(&self.data).decode_utf8()?.into_owned();
-            for uri in decoded.split("\r\n").filter(|u| !u.is_empty()) {
-                // The format is specified as protocol://host/path
-                // However, it's typically simply protocol:///path
-                let path_str = if uri.starts_with("file://") {
-                    let path_str = uri.replace("file://", "");
-                    if !path_str.starts_with('/') {
-                        // A hostname is specified
-                        // Supporting this case is beyond the scope of my mental health
-                        return Err(UriListParseError::HostnameSpecified(path_str));
-                    }
-                    path_str
-                } else {
-                    // Only the file protocol is supported
-                    return Err(UriListParseError::UnexpectedProtocol(uri.to_owned()));
-                };
+    // Instead of reimplementing `io::Cursor`, we have a maximally-conservative
+    // implementation that just synchronizes state in order to prevent the chance
+    // of misimplementation.
+    fn with_cursor<F, O>(&mut self, func: F) -> io::Result<O>
+    where
+        F: FnOnce(&mut io::Cursor<&[u8]>) -> io::Result<O>,
+    {
+        let data = self.data.try_data()?;
 
-                let path = Path::new(&path_str).canonicalize()?;
-                path_list.push(path);
-            }
-            Ok(path_list)
-        } else {
-            Err(UriListParseError::EmptyData)
-        }
+        let mut cursor = io::Cursor::new(&data[..]);
+        cursor.set_position(self.pos);
+        let result = func(&mut cursor)?;
+        let new_pos = cursor.position();
+        self.pos = new_pos;
+
+        Ok(result)
     }
 }
 
 impl TypedData for SelectionReader {
-    fn try_read(&mut self) -> Option<Box<dyn io::BufRead + '_>> {
-        Some(Box::new(io::Cursor::new(&self.data)))
+    fn try_read(&mut self) -> Option<Box<dyn io::BufRead + Send>> {
+        Some(Box::new(self.clone()))
     }
 
     fn type_(&self) -> &dyn TransferType {
         &self.type_
     }
 
-    fn try_as_string(&mut self) -> Option<String> {
-        fn decode_utf16_bytes(bytes: &[u8]) -> Option<String> {
+    fn try_as_string(&mut self) -> io::Result<String> {
+        fn invalid_data<E>(err: E) -> io::Error
+        where
+            E: Into<Box<dyn std::error::Error + Send + Sync>>,
+        {
+            io::Error::new(io::ErrorKind::InvalidData, err)
+        }
+
+        fn decode_utf16_bytes(bytes: &[u8]) -> io::Result<String> {
             let utf16 = bytes
                 .chunks_exact(2)
                 .into_iter()
@@ -102,59 +243,75 @@ impl TypedData for SelectionReader {
                     u16::from_ne_bytes(*bytes)
                 })
                 .collect::<Vec<_>>();
-            String::from_utf16(&utf16).ok()
+            String::from_utf16(&utf16).map_err(invalid_data)
         }
 
         match self.type_.hint() {
             Some(TypeHint::Plaintext) | Some(TypeHint::Html) => {
+                let data = self.data.try_data()?;
+
                 // Bad way to detect UTF-16 - some applications (confirmed to at least happen with
                 // Firefox) don't emit a BOM when passing HTML, so we need to check:
                 // A) Does the string contain a null
                 // B) Can the string be decoded as UTF-8
-                if self.data.contains(&0) {
-                    decode_utf16_bytes(&self.data)
+                if data.contains(&0) {
+                    decode_utf16_bytes(data)
                         // Even if we guess that it's utf-16, we'll still try utf-8 just in case
-                        .or_else(|| str::from_utf8(&self.data).ok().map(|str| str.to_owned()))
+                        .or_else(|_| {
+                            str::from_utf8(data).map(|str| str.to_owned()).map_err(invalid_data)
+                        })
                 } else {
-                    str::from_utf8(&self.data)
+                    str::from_utf8(data)
                         .map(|str| str.to_owned())
-                        .ok()
-                        .or_else(|| decode_utf16_bytes(&self.data))
+                        .map_err(invalid_data)
+                        .or_else(|_| decode_utf16_bytes(data))
                 }
             },
             Some(TypeHint::UriList) => {
-                percent_decode(&self.data).decode_utf8().ok().map(Into::into)
+                let data = self.data.try_data()?;
+
+                percent_decode(data).decode_utf8().map(Into::into).map_err(invalid_data)
             },
-            _ => None,
+            _ => Err(io::ErrorKind::InvalidData.into()),
         }
     }
 
-    fn try_as_uris(&mut self) -> Option<Vec<String>> {
+    fn try_as_uris(&mut self) -> io::Result<Vec<String>> {
         if self.type_().hint() != Some(TypeHint::UriList) {
-            return None;
+            return Err(io::ErrorKind::InvalidData.into());
         }
 
-        Some(
-            self.try_as_string()?
-                .split(|c| c == '\n' || c == '\r')
-                .filter(|s| !s.is_empty())
-                .map(Into::into)
-                .collect(),
-        )
+        Ok(self
+            .try_as_string()?
+            .split(|c| c == '\n' || c == '\r')
+            .filter(|s| !s.is_empty())
+            .map(Into::into)
+            .collect())
+    }
+
+    fn wait_for_data(&self) -> io::Result<()> {
+        self.data.wait_for_data()
     }
 }
 
 #[derive(Debug)]
-pub struct SelectionFetchState {
-    pub serial: AsyncRequestSerial,
-    pub type_: xproto::Atom,
+pub(crate) struct SelectionFetchState {
+    type_: SelectionType,
     // Populated by SelectionNotify event handler
-    pub value: Option<io::Result<Box<SelectionReader>>>,
+    value: SharedDataWriter,
 }
 
 impl SelectionFetchState {
-    pub fn new(type_: xproto::Atom) -> Self {
-        Self { serial: AsyncRequestSerial::get(), type_, value: None }
+    pub(crate) fn new(type_: SelectionType) -> Self {
+        Self { type_, value: Default::default() }
+    }
+
+    pub(crate) fn type_(&self) -> &SelectionType {
+        &self.type_
+    }
+
+    pub(crate) fn as_reader(&self, sentinel: DeadlockSentinelReader) -> SelectionReader {
+        SelectionReader::new(self.type_().clone(), self.value.reader(sentinel))
     }
 }
 
@@ -175,6 +332,7 @@ pub struct Dnd {
     pub target_window: Option<xproto::Window>,
     // Populated by `fetch_data_transfer`
     pub last_fetched_selection: Option<SelectionFetchState>,
+    pub deadlock_sentinel: DeadlockSentinel,
 }
 
 #[derive(Debug)]
@@ -188,7 +346,7 @@ impl Selection {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 pub struct SelectionType {
     hint: Option<TypeHint>,
     atom: xproto::Atom,
@@ -289,15 +447,19 @@ impl DataTransfer for Selection {
 }
 
 impl Dnd {
-    pub fn new(xconn: Arc<XConnection>) -> Self {
-        Self::with_id(xconn, DataTransferId::from_raw(0))
+    pub fn new(xconn: Arc<XConnection>, sentinel: DeadlockSentinel) -> Self {
+        Self::with_id(xconn, sentinel, DataTransferId::from_raw(0))
     }
 
     pub fn find_type_by_hint(&self, hint: TypeHint) -> Option<&SelectionType> {
         self.types.as_ref()?.iter().find(|haystack| haystack.hint() == Some(hint))
     }
 
-    fn with_id(xconn: Arc<XConnection>, transfer_id: DataTransferId) -> Self {
+    fn with_id(
+        xconn: Arc<XConnection>,
+        deadlock_sentinel: DeadlockSentinel,
+        transfer_id: DataTransferId,
+    ) -> Self {
         Dnd {
             xconn,
             transfer_id,
@@ -307,6 +469,7 @@ impl Dnd {
             source_window: None,
             target_window: None,
             last_fetched_selection: None,
+            deadlock_sentinel,
         }
     }
 
@@ -316,8 +479,9 @@ impl Dnd {
 
     pub fn reset(&mut self) {
         let xconn = self.xconn.clone();
+        let sentinel = std::mem::take(&mut self.deadlock_sentinel);
         let new_id = DataTransferId::from_raw(self.transfer_id.into_raw().wrapping_add(1));
-        *self = Self::with_id(xconn, new_id);
+        *self = Self::with_id(xconn, sentinel, new_id);
     }
 
     pub unsafe fn send_status(
@@ -395,16 +559,21 @@ impl Dnd {
             .expect_then_ignore_error("Failed to send XdndSelection event")
     }
 
-    pub unsafe fn read_data(
-        &self,
-        window: xproto::Window,
-    ) -> Result<(xproto::Atom, Vec<c_uchar>), util::GetPropertyError> {
+    pub unsafe fn read_data(&self, window: xproto::Window) -> Result<(), util::GetPropertyError> {
+        // Never fetched
+        let data =
+            self.last_fetched_selection.as_ref().ok_or_else(|| util::GetPropertyError::Unknown)?;
+
         let atoms = self.xconn.atoms();
         let type_ = self
             .last_fetched_selection
             .as_ref()
-            .map(|state| state.type_)
+            .map(|state| state.type_.atom())
             .ok_or(util::GetPropertyError::Unknown)?;
-        Ok((type_, self.xconn.get_property(window, atoms[XdndSelection], type_)?))
+        let bytes = self.xconn.get_property(window, atoms[XdndSelection], type_)?;
+
+        data.value.write(bytes.into()).map_err(|_| util::GetPropertyError::Unknown)?;
+
+        Ok(())
     }
 }

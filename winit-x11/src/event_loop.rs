@@ -24,9 +24,9 @@ use winit_core::error::{EventLoopError, NotSupportedError, RequestError};
 use winit_core::event::{DeviceId, StartCause, WindowEvent};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, AsyncRequestSerial, ControlFlow, DeviceEvents,
+    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents,
     EventLoopProxy as CoreEventLoopProxy, EventLoopProxyProvider,
-    OwnedDisplayHandle as CoreOwnedDisplayHandle, UnknownDataTransfer,
+    OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
 use winit_core::window::{Theme, Window as CoreWindow, WindowAttributes, WindowId};
@@ -38,7 +38,7 @@ use x11rb::x11_utils::X11Error as LogicalError;
 use x11rb::xcb_ffi::ReplyOrIdError;
 
 use crate::atoms::*;
-use crate::dnd::{Dnd, DndState, SelectionFetchState};
+use crate::dnd::{DeadlockSentinelGuard, Dnd, SelectionFetchState};
 use crate::event_processor::{EventProcessor, MAX_MOD_REPLAY_LEN};
 use crate::ime::{self, Ime, ImeCreationError, ImeSender};
 use crate::util::{self, CustomCursor};
@@ -228,7 +228,7 @@ impl EventLoop {
         let net_wm_ping = atoms[_NET_WM_PING];
         let net_wm_sync_request = atoms[_NET_WM_SYNC_REQUEST];
 
-        let dnd = Dnd::new(Arc::clone(&xconn));
+        let dnd = Dnd::new(Arc::clone(&xconn), Default::default());
         let dnd = Arc::new(RwLock::new(dnd));
 
         let (ime_sender, ime_receiver) = mpsc::channel();
@@ -560,6 +560,8 @@ impl EventLoop {
     }
 
     fn single_iteration<A: ApplicationHandler>(&mut self, app: &mut A, cause: StartCause) {
+        let _guard = self.event_processor.target.selection_deadlock_guard();
+
         app.new_events(&self.event_processor.target, cause);
 
         // NB: For consistency all platforms must call `can_create_surfaces` even though X11
@@ -623,9 +625,8 @@ impl EventLoop {
     fn drain_events<A: ApplicationHandler>(&mut self, app: &mut A) {
         let mut xev = MaybeUninit::uninit();
 
-        while unsafe { self.event_processor.poll_one_event(xev.as_mut_ptr()) } {
-            let mut xev = unsafe { xev.assume_init() };
-            self.event_processor.process_event(&mut xev, app);
+        while let Some(xev) = self.event_processor.poll_one_event(&mut xev) {
+            self.event_processor.process_event(xev, app);
         }
     }
 
@@ -663,6 +664,10 @@ impl ActiveEventLoop {
     #[inline]
     pub(crate) fn x_connection(&self) -> &Arc<XConnection> {
         &self.xconn
+    }
+
+    pub(crate) fn selection_deadlock_guard(&self) -> DeadlockSentinelGuard {
+        self.dnd.read().unwrap().deadlock_sentinel.guard()
     }
 
     /// Update the device event based on window focus.
@@ -762,12 +767,9 @@ impl RootActiveEventLoop for ActiveEventLoop {
         self
     }
 
-    fn data_transfer(
-        &self,
-        id: DataTransferId,
-    ) -> Result<Box<dyn DataTransfer>, UnknownDataTransfer> {
+    fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
         if self.dnd.read().unwrap().transfer_id() != id {
-            return Err(UnknownDataTransfer(id));
+            return Err(RequestError::Ignored);
         }
 
         Ok(Box::new(Selection::new(self.dnd.clone())))
@@ -777,7 +779,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
         &self,
         id: DataTransferId,
         type_: &dyn TransferType,
-    ) -> Result<AsyncRequestSerial, RequestError> {
+    ) -> Result<Box<dyn TypedData>, RequestError> {
         let mut dnd = self.dnd.write().unwrap();
         if dnd.transfer_id() != id {
             return Err(RequestError::NotSupported(NotSupportedError::new(
@@ -789,12 +791,6 @@ impl RootActiveEventLoop for ActiveEventLoop {
             return Err(RequestError::NotSupported(NotSupportedError::new(
                 "Unknown source window",
             )));
-        }
-
-        if let Some(state) = &dnd.last_fetched_selection
-            && state.value.is_some()
-        {
-            return Ok(state.serial);
         }
 
         let Some(window) = dnd.target_window else {
@@ -809,47 +805,25 @@ impl RootActiveEventLoop for ActiveEventLoop {
             .cloned()
             .ok_or(RequestError::NotSupported(NotSupportedError::new("Unknown type hint")))?;
 
-        let new_fetch_state = SelectionFetchState::new(type_.atom());
-        let serial = new_fetch_state.serial;
+        let mut new_state =
+            dnd.last_fetched_selection.take().filter(|state| state.type_() == &type_);
 
-        dnd.last_fetched_selection = Some(new_fetch_state);
+        let deadlock_sentinel = dnd.deadlock_sentinel.reader();
+        let reader = new_state
+            .get_or_insert_with(|| {
+                // This results in the `SelectionNotify` event
+                unsafe {
+                    // TODO: Handle this better
+                    dnd.convert_selection(window, self.xconn.timestamp(), type_.atom());
+                }
 
-        // This results in the `SelectionNotify` event below
-        unsafe {
-            // TODO: Handle this better
-            dnd.convert_selection(window, self.xconn.timestamp(), type_.atom());
-        }
+                SelectionFetchState::new(type_)
+            })
+            .as_reader(deadlock_sentinel);
 
-        Ok(serial)
-    }
+        dnd.last_fetched_selection = new_state;
 
-    fn data_transfer_result(
-        &self,
-        serial: AsyncRequestSerial,
-    ) -> Result<Box<dyn TypedData>, RequestError> {
-        let dnd = self.dnd.read().unwrap();
-
-        if dnd.source_window.is_none() {
-            return Err(RequestError::NotSupported(NotSupportedError::new(
-                "Unknown source window",
-            )));
-        }
-
-        if dnd.target_window.is_none() {
-            return Err(RequestError::NotSupported(NotSupportedError::new(
-                "Unknown target window",
-            )));
-        }
-
-        dnd.last_fetched_selection
-            .as_ref()
-            .filter(|state| state.serial == serial)
-            .and_then(|state| state.value.as_ref())
-            // TODO: Actually return the error to the user somehow, maybe through a dummy
-            // `TypedData` impl?
-            .and_then(|res| res.as_ref().ok())
-            .map(|reader| reader.clone() as _)
-            .ok_or(RequestError::Ignored)
+        Ok(Box::new(reader))
     }
 }
 

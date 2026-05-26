@@ -5,13 +5,14 @@ use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::os::raw::*;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{cmp, env};
 
 use dpi::{PhysicalInsets, PhysicalPosition, PhysicalSize, Position, Size};
 use tracing::{debug, info, warn};
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::Cursor;
+use winit_core::data_transfer::DataTransferId;
 use winit_core::error::{NotSupportedError, RequestError};
 use winit_core::event::{SurfaceSizeWriter, WindowEvent};
 use winit_core::event_loop::AsyncRequestSerial;
@@ -21,8 +22,8 @@ use winit_core::monitor::{
 };
 use winit_core::window::{
     CursorGrabMode, ImeCapabilities, ImeRequest as CoreImeRequest, ImeRequestError,
-    ResizeDirection, Theme, UserAttentionType, Window as CoreWindow, WindowAttributes,
-    WindowButtons, WindowId, WindowLevel,
+    ResizeDirection, Theme, UnknownDataTransfer, UserAttentionType, Window as CoreWindow,
+    WindowAttributes, WindowButtons, WindowId, WindowLevel,
 };
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::properties::{WmHints, WmSizeHints, WmSizeHintsSpecification};
@@ -32,6 +33,7 @@ use x11rb::protocol::xproto::{self, ClipOrdering, ConnectionExt as _, Rectangle}
 use x11rb::protocol::{randr, xinput};
 
 use crate::atoms::*;
+use crate::dnd::{Dnd, DndState};
 use crate::event_loop::{
     ALL_MASTER_DEVICES, ActivationItem, ActiveEventLoop, CookieResultExt, ICONIC_STATE, VoidCookie,
     WakeSender, X11Error, xinput_fp1616_to_float,

@@ -1,8 +1,9 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::mem::MaybeUninit;
 use std::os::raw::{c_char, c_int, c_long, c_ulong};
+use std::slice;
 use std::sync::{Arc, Mutex};
-use std::{io, slice};
 
 use dpi::{PhysicalPosition, PhysicalSize};
 use tracing::warn;
@@ -32,7 +33,7 @@ use x11rb::x11_utils::{ExtensionInformation, Serialize};
 use xkbcommon_dl::xkb_mod_mask_t;
 
 use crate::atoms::*;
-use crate::dnd::{DndState, SelectionReader, SelectionType};
+use crate::dnd::{DndState, SelectionType};
 use crate::event_loop::{
     ALL_DEVICES, ActiveEventLoop, CookieResultExt, Device, DeviceInfo, DeviceType,
     ScrollOrientation, mkdid, mkwid,
@@ -294,7 +295,10 @@ impl EventProcessor {
         unsafe { (self.target.xconn.xlib.XPending)(self.target.xconn.display) != 0 }
     }
 
-    pub unsafe fn poll_one_event(&mut self, event_ptr: *mut XEvent) -> bool {
+    pub fn poll_one_event<'a>(
+        &mut self,
+        event_ptr: &'a mut MaybeUninit<XEvent>,
+    ) -> Option<&'a mut XEvent> {
         // This function is used to poll and remove a single event
         // from the Xlib event queue in a non-blocking, atomic way.
         // XCheckIfEvent is non-blocking and removes events from queue.
@@ -304,20 +308,21 @@ impl EventProcessor {
         unsafe extern "C" fn predicate(
             _display: *mut XDisplay,
             _event: *mut XEvent,
-            _arg: *mut c_char,
+            _filter: *mut c_char,
         ) -> c_int {
-            // This predicate always returns "true" (1) to accept all events
             1
         }
 
-        unsafe {
+        let event_initialized = unsafe {
             (self.target.xconn.xlib.XCheckIfEvent)(
                 self.target.xconn.display,
-                event_ptr,
+                event_ptr.as_mut_ptr(),
                 Some(predicate),
                 std::ptr::null_mut(),
             ) != 0
-        }
+        };
+
+        event_initialized.then(|| unsafe { event_ptr.assume_init_mut() })
     }
 
     pub fn init_device(&self, device: xinput::DeviceId) {
@@ -570,11 +575,11 @@ impl EventProcessor {
         }
     }
 
-    fn selection_notify(&mut self, xev: &XSelectionEvent, app: &mut dyn ApplicationHandler) {
+    // TODO: Should we have an explicit notification for when the selection is ready?
+    fn selection_notify(&mut self, xev: &XSelectionEvent, _: &mut dyn ApplicationHandler) {
         let atoms = self.target.xconn.atoms();
 
         let window = xev.requestor as xproto::Window;
-        let window_id = mkwid(window);
 
         // Set the timestamp.
         self.target.xconn.set_timestamp(xev.time as xproto::Timestamp);
@@ -585,28 +590,7 @@ impl EventProcessor {
             return;
         }
 
-        // This is where we receive data from drag and drop
-        let (serial, transfer_id) = {
-            let mut dnd = self.target.dnd.write().unwrap();
-            let result = unsafe { dnd.read_data(window) };
-            let Some(selection_fetch_state) = &mut dnd.last_fetched_selection else {
-                return;
-            };
-            let new_value = result
-                .map(|(ty, data)| {
-                    Box::new(SelectionReader::new(SelectionType::new(atoms, ty), data.into()))
-                })
-                .map_err(io::Error::other);
-
-            selection_fetch_state.value = Some(new_value);
-
-            (selection_fetch_state.serial, dnd.transfer_id())
-        };
-
-        app.window_event(&self.target, window_id, WindowEvent::DataTransferResult {
-            id: transfer_id,
-            serial,
-        });
+        let _ = unsafe { self.target.dnd.read().unwrap().read_data(window) };
     }
 
     fn configure_notify(&self, xev: &XConfigureEvent, app: &mut dyn ApplicationHandler) {

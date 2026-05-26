@@ -1,6 +1,6 @@
 //! End user application handling.
 
-use crate::event::{DataTransferEvent, DeviceEvent, DeviceId, StartCause, WindowEvent};
+use crate::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
 use crate::event_loop::ActiveEventLoop;
 use crate::window::WindowId;
 
@@ -198,14 +198,6 @@ pub trait ApplicationHandler {
         window_id: WindowId,
         event: WindowEvent,
     );
-
-    /// Emitted when the state of a [data transfer](crate::data_transfer) changes.
-    ///
-    /// Most applications do not need to handle this, see documentation for
-    /// [`ActiveEventLoop::fetch_data_transfer`].
-    fn data_transfer_event(&mut self, event_loop: &dyn ActiveEventLoop, event: DataTransferEvent) {
-        let _ = (event_loop, event);
-    }
 
     /// Emitted when the OS sends an event to a device.
     ///
@@ -419,11 +411,6 @@ impl<A: ?Sized + ApplicationHandler> ApplicationHandler for &mut A {
     fn macos_handler(&mut self) -> Option<&mut dyn macos::ApplicationHandlerExtMacOS> {
         (**self).macos_handler()
     }
-
-    #[inline]
-    fn data_transfer_event(&mut self, event_loop: &dyn ActiveEventLoop, event: DataTransferEvent) {
-        (**self).data_transfer_event(event_loop, event);
-    }
 }
 
 #[deny(clippy::missing_trait_methods)]
@@ -491,10 +478,5 @@ impl<A: ?Sized + ApplicationHandler> ApplicationHandler for Box<A> {
     #[inline]
     fn macos_handler(&mut self) -> Option<&mut dyn macos::ApplicationHandlerExtMacOS> {
         (**self).macos_handler()
-    }
-
-    #[inline]
-    fn data_transfer_event(&mut self, event_loop: &dyn ActiveEventLoop, event: DataTransferEvent) {
-        (**self).data_transfer_event(event_loop, event);
     }
 }

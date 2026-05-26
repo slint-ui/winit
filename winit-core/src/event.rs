@@ -623,17 +623,6 @@ impl FingerId {
     }
 }
 
-// TODO: Remove this, `DataTransferResult` is only necessary for X11 and there's a workaround
-// implemented by Qt https://github.com/qt/qtbase/blob/dev/src/plugins/platforms/xcb/qxcbclipboard.cpp#L724
-pub enum DataTransferEvent {
-    // TODO: We should remove this event, but it would still be nice if we had a way to express
-    // this (probably in `ActiveEventLoop`).
-    Dropped { id: DataTransferId },
-
-    // TODO: Remove this
-    FetchResult { id: DataTransferId, serial: AsyncRequestSerial },
-}
-
 /// Represents raw hardware events that are not associated with any particular window.
 ///
 /// Useful for interactions that diverge significantly from a conventional 2D GUI, such as 3D camera

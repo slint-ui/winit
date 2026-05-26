@@ -119,34 +119,13 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
     /// Request to fetch a type from a [data transfer](crate::data_transfer::DataTransfer).
     ///
     /// This may be called multiple times on the same [`DataTransferId`] with different types.
-    ///
-    /// The result of the fetch is only guaranteed to be available after the
-    /// [`DataTransferEvent::FetchResult`](crate::event::DataTransferEvent::FetchResult) event is
-    /// emitted. However, on most platforms the result will be available immediately. The
-    /// user can attempt to access the result without waiting for `FetchResult`, and on platforms
-    /// where this does not .
     fn fetch_data_transfer(
         &self,
         id: DataTransferId,
         type_: &dyn TransferType,
-    ) -> Result<AsyncRequestSerial, RequestError> {
+    ) -> Result<Box<dyn TypedData>, RequestError> {
         let _ = id;
         let _ = type_;
-        Err(RequestError::NotSupported(NotSupportedError::new(
-            "Cross-application data transfer (e.g. drag-and-drop, clipboard) is unsupported on \
-             this platform",
-        )))
-    }
-
-    /// Get the resolved data for a data transfer.
-    ///
-    /// Requires first calling [`fetch_data_transfer`](ActiveEventLoop::fetch_data_transfer) and
-    /// waiting for the corresponding `DataTransferResult` event.
-    fn data_transfer_result(
-        &self,
-        serial: AsyncRequestSerial,
-    ) -> Result<Box<dyn TypedData>, RequestError> {
-        let _ = serial;
         Err(RequestError::NotSupported(NotSupportedError::new(
             "Cross-application data transfer (e.g. drag-and-drop, clipboard) is unsupported on \
              this platform",

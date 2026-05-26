@@ -2,9 +2,9 @@ use std::error::Error;
 
 use tracing::{error, info};
 use winit::application::ApplicationHandler;
-use winit::data_transfer::{DataTransferId, TypeHint};
-use winit::event::{DataTransferEvent, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, AsyncRequestSerial, EventLoop};
+use winit::data_transfer::{TypeHint, TypedData};
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 #[path = "util/fill.rs"]
@@ -21,19 +21,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(event_loop.run_app(app)?)
 }
 
-#[derive(Debug)]
-struct FetchState {
-    id: DataTransferId,
-    serial: AsyncRequestSerial,
-    type_: TypeHint,
-    received: bool,
-}
-
 /// Application state and event handling.
 #[derive(Debug, Default)]
 struct Application {
     window: Option<Box<dyn Window>>,
-    last_dnd_fetch: Option<FetchState>,
+    last_dnd_fetch: Option<Box<dyn TypedData>>,
 }
 
 impl Application {
@@ -70,25 +62,24 @@ impl ApplicationHandler for Application {
             WindowEvent::DragDropped { .. } => {
                 info!("{event:?}");
 
-                if let Some(state) = &self.last_dnd_fetch {
-                    if state.received {
-                        let mut data = event_loop.data_transfer_result(state.serial).unwrap();
-                        assert_eq!(data.type_().hint(), Some(state.type_));
-                        match state.type_ {
-                            TypeHint::Plaintext | TypeHint::Html => {
-                                let text = data.try_as_string().unwrap();
-                                info!("{text:?}");
-                            },
-                            TypeHint::UriList => {
-                                let uris = data.try_as_uris().unwrap();
-                                info!("{uris:#?}");
-                            },
-                            _ => {
-                                unreachable!("Received a type we didn't ask for!");
-                            },
-                        }
-                    } else {
-                        info!("Never received");
+                if let Some(data) = &mut self.last_dnd_fetch {
+                    // This may return an error with `io::ErrorKind::Deadlock` on X11 if
+                    // this is called in the event loop thread while the application is
+                    // still waiting for data.
+                    data.wait_for_data().unwrap();
+
+                    match data.type_().hint() {
+                        Some(TypeHint::Plaintext | TypeHint::Html) => {
+                            let text = data.try_as_string().unwrap();
+                            info!("{text:?}");
+                        },
+                        Some(TypeHint::UriList) => {
+                            let uris = data.try_as_uris().unwrap();
+                            info!("{uris:#?}");
+                        },
+                        _ => {
+                            unreachable!("Received a type we didn't ask for!");
+                        },
                     }
                 }
 
@@ -128,10 +119,14 @@ impl ApplicationHandler for Application {
 
                 window.accept_drag_type(id, &type_).unwrap();
 
-                self.last_dnd_fetch = event_loop
-                    .fetch_data_transfer(id, &type_)
-                    .ok()
-                    .map(|serial| FetchState { id, serial, type_, received: false });
+                self.last_dnd_fetch = event_loop.fetch_data_transfer(id, &type_).ok();
+
+                match self.last_dnd_fetch.as_ref().unwrap().wait_for_data() {
+                    Err(e) if e.kind() == std::io::ErrorKind::Deadlock => {
+                        eprintln!("Immediately waiting for a fetched data transfer may deadlock!");
+                    },
+                    _ => {},
+                }
             },
             WindowEvent::RedrawRequested => {
                 let window = self.window.as_ref().unwrap();
@@ -142,24 +137,6 @@ impl ApplicationHandler for Application {
                 event_loop.exit();
             },
             _ => {},
-        }
-    }
-
-    fn data_transfer_event(&mut self, _: &dyn ActiveEventLoop, event: DataTransferEvent) {
-        match event {
-            DataTransferEvent::Dropped { id } => {
-                if self.last_dnd_fetch.as_ref().is_some_and(|state| state.id == id) {
-                    self.last_dnd_fetch = None;
-                }
-            },
-            DataTransferEvent::FetchResult { id, serial } => {
-                if let Some(state) = &mut self.last_dnd_fetch
-                    && state.serial == serial
-                    && id == state.id
-                {
-                    state.received = true;
-                }
-            },
         }
     }
 }
