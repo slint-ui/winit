@@ -12,8 +12,8 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSArray, NSData, NSString};
 use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypeHint, TypedData};
-use winit_core::event_loop::AsyncRequestSerial;
 
+/// A thin wrapper around [`NSPasteboardType`], implementing [`TransferType`].
 #[derive(Debug, Clone)]
 pub struct PasteboardType {
     hint: Option<TypeHint>,
@@ -48,8 +48,6 @@ impl Deref for PasteboardType {
     }
 }
 
-pub struct InvalidPasteboardTypeError(pub TypeHint);
-
 impl From<Retained<NSPasteboardType>> for PasteboardType {
     fn from(value: Retained<NSPasteboardType>) -> Self {
         let pasteboard_type_to_hint = unsafe {
@@ -79,6 +77,7 @@ impl TransferType for PasteboardType {
     }
 }
 
+/// A thin wrapper around [`NSPasteboard`], implementing [`DataTransfer`].
 #[derive(Clone, Debug)]
 pub struct Pasteboard {
     transfer_id: DataTransferId,
@@ -94,15 +93,15 @@ impl Deref for Pasteboard {
 }
 
 impl Pasteboard {
-    pub(crate) fn set_pasteboard(&mut self, pasteboard: Retained<NSPasteboard>) {
-        self.inner = pasteboard;
-    }
-
+    /// Get the `DataTransferId` of this pasteboard.
     pub fn id(&self) -> DataTransferId {
         self.transfer_id
     }
 
-    pub fn with_type(&self, dyn_type: &dyn TransferType) -> Option<PasteboardValue> {
+    /// Get a typed reader for this pasteboard. This is only necessary in the cross-platform case,
+    /// as a user downcasting to the platform-specific type can just access the `NSPasteboard`
+    /// directly.
+    pub(crate) fn with_type(&self, dyn_type: &dyn TransferType) -> Option<PasteboardValue> {
         if self.has_type(dyn_type) {
             Some(PasteboardValue {
                 type_: PasteboardTypeSpec::from_dyn(dyn_type)?,
@@ -175,6 +174,7 @@ impl PasteboardTypeSpec {
     }
 }
 
+/// A thin wrapper around [`NSPasteboard`], implementing [`TypedValue`].
 #[derive(Debug)]
 pub struct PasteboardValue {
     // The concept of "top-level" types for a pasteboard doesn't always make sense on macOS due to

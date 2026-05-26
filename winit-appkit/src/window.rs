@@ -10,7 +10,7 @@ use objc2_app_kit::{NSPanel, NSResponder, NSWindow};
 use objc2_foundation::NSObject;
 use tracing::trace_span;
 use winit_core::cursor::Cursor;
-use winit_core::data_transfer::{DataTransferId, TransferType};
+use winit_core::data_transfer::DataTransferId;
 use winit_core::error::RequestError;
 use winit_core::icon::Icon;
 use winit_core::monitor::{Fullscreen, MonitorHandle as CoreMonitorHandle};

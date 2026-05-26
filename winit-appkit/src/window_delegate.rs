@@ -19,12 +19,12 @@ use objc2::{
 use objc2_app_kit::{
     NSAppKitVersionNumber, NSAppKitVersionNumber10_12, NSAppearance, NSAppearanceCustomization,
     NSAppearanceNameAqua, NSApplication, NSApplicationPresentationOptions, NSBackingStoreType,
-    NSColor, NSDraggingDestination, NSDraggingInfo, NSPasteboardTypeColor, NSPasteboardTypeFileURL,
-    NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeSound, NSPasteboardTypeString,
-    NSPasteboardTypeTIFF, NSRequestUserAttentionType, NSScreen, NSToolbar, NSView,
-    NSViewFrameDidChangeNotification, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowLevel,
-    NSWindowOcclusionState, NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask,
-    NSWindowTabbingMode, NSWindowTitleVisibility, NSWindowToolbarStyle,
+    NSColor, NSDraggingDestination, NSDraggingInfo, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
+    NSPasteboardTypePNG, NSPasteboardTypeSound, NSPasteboardTypeString, NSPasteboardTypeTIFF,
+    NSRequestUserAttentionType, NSScreen, NSToolbar, NSView, NSViewFrameDidChangeNotification,
+    NSWindow, NSWindowButton, NSWindowDelegate, NSWindowLevel, NSWindowOcclusionState,
+    NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode,
+    NSWindowTitleVisibility, NSWindowToolbarStyle,
 };
 #[allow(deprecated)]
 use objc2_app_kit::{NSFilenamesPboardType, NSWindowFullScreenButton};
@@ -445,7 +445,6 @@ define_class!(
 
             let pb = sender.draggingPasteboard();
 
-            let transfer_id = transfer_id;
             vars.app_state.dnd().set_pasteboard(transfer_id, &pb);
 
             let dl = sender.draggingLocation();
