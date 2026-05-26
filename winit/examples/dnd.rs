@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::data_transfer::{TypeHint, TypedData};
 use winit::event::WindowEvent;
@@ -123,7 +123,7 @@ impl ApplicationHandler for Application {
 
                 match self.last_dnd_fetch.as_ref().unwrap().wait_for_data() {
                     Err(e) if e.kind() == std::io::ErrorKind::Deadlock => {
-                        eprintln!("Immediately waiting for a fetched data transfer may deadlock!");
+                        warn!("Immediately waiting for a fetched data transfer may deadlock!");
                     },
                     _ => {},
                 }
