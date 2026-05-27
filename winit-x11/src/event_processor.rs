@@ -3,6 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use std::mem::MaybeUninit;
 use std::os::raw::{c_char, c_int, c_long, c_ulong};
 use std::slice;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use dpi::{PhysicalPosition, PhysicalSize};
@@ -431,7 +432,7 @@ impl EventProcessor {
             // Cautiously limit the scope of the `dnd` lock so we don't rely on `app.window_event`
             // never contending the lock.
             let transfer_id = {
-                let mut dnd = self.target.dnd.write().unwrap();
+                let mut dnd = self.target.dnd.borrow_mut();
                 // We only reset when a new drag-and-drop enters, to maximize the amount of time
                 // that the drag data can be accessed.
                 dnd.reset();
@@ -440,30 +441,27 @@ impl EventProcessor {
                 let flags = xev.data.get_long(1);
 
                 let version = flags >> 24;
-                dnd.version = Some(version);
-                dnd.source_window = Some(source_window);
-                dnd.target_window = Some(window);
 
                 let has_more_types = flags - (flags & (c_long::MAX - 1)) == 1;
-                if !has_more_types {
-                    let type_list = [
+                let types: Vec<_> = if !has_more_types {
+                    [
                         xev.data.get_long(2) as xproto::Atom,
                         xev.data.get_long(3) as xproto::Atom,
                         xev.data.get_long(4) as xproto::Atom,
                     ]
                     .map(|ty_atom| SelectionType::new(atoms, ty_atom))
                     .into_iter()
-                    .collect();
-                    dnd.types = Some(type_list);
+                    .collect()
                 } else if let Ok(more_types) = unsafe { dnd.get_type_list(source_window) } {
-                    dnd.types = Some(
-                        more_types
-                            .into_iter()
-                            .map(|ty_atom| SelectionType::new(atoms, ty_atom))
-                            .collect(),
-                    );
-                }
+                    more_types
+                        .into_iter()
+                        .map(|ty_atom| SelectionType::new(atoms, ty_atom))
+                        .collect()
+                } else {
+                    Default::default()
+                };
 
+                dnd.init_state(version, source_window, window, types.into());
                 dnd.transfer_id()
             };
 
@@ -501,16 +499,12 @@ impl EventProcessor {
             // Cautiously limit the scope of the `dnd` lock so we don't rely on `app.window_event`
             // never contending the lock.
             let transfer_id = {
-                let mut dnd = self.target.dnd.write().unwrap();
-                // By our own state flow, `version` should never be `None` at this point.
-                let version = dnd.version.unwrap_or(5);
-
-                if dnd.target_window != Some(window) {
+                let dnd = self.target.dnd.borrow();
+                // By our own state flow, `state` should never be `None` at this point.
+                let version = dnd.state.as_ref().map(|s| s.version).unwrap_or_else(|| {
                     warn!("Received `XdndPosition` without `XdndEnter`");
-                    dnd.target_window = Some(window);
-                }
-
-                dnd.source_window = Some(source_window);
+                    5
+                });
 
                 let time = if version == 0 {
                     // In version 0, time isn't specified
@@ -522,15 +516,17 @@ impl EventProcessor {
                 // Log this timestamp.
                 self.target.xconn.set_timestamp(time);
 
-                let status = if dnd.accepted.unwrap_or_default() {
-                    DndState::Accepted
-                } else {
-                    DndState::Rejected
-                };
-
                 unsafe {
-                    dnd.send_status(window, source_window, status)
-                        .expect("Failed to send `XdndStatus` message.");
+                    dnd.send_status(
+                        window,
+                        source_window,
+                        if dnd.shared.accepted.load(Ordering::Relaxed) {
+                            DndState::Accepted
+                        } else {
+                            DndState::Rejected
+                        },
+                    )
+                    .expect("Failed to send `XdndStatus` message.");
                 }
 
                 dnd.transfer_id()
@@ -545,16 +541,24 @@ impl EventProcessor {
         }
 
         if xev.message_type == atoms[XdndDrop] as c_ulong {
-            let dnd = self.target.dnd.read().unwrap();
-            let (source_window, state) = if let Some(source_window) = dnd.source_window {
-                (source_window, DndState::Accepted)
-            } else {
-                // `source_window` won't be part of our DND state if we already rejected the drop in
-                // our `XdndPosition` handler.
-                let source_window = xev.data.get_long(0) as xproto::Window;
-                (source_window, DndState::Rejected)
+            let dnd = self.target.dnd.borrow();
+            let Some(source_window) = dnd.state.as_ref().map(|s| s.source_window) else {
+                warn!("Received `XdndDrop` without `XdndEnter`");
+                return;
             };
 
+            unsafe {
+                dnd.send_status(
+                    window,
+                    source_window,
+                    if dnd.shared.accepted.load(Ordering::Relaxed) {
+                        DndState::Accepted
+                    } else {
+                        DndState::Rejected
+                    },
+                )
+                .expect("Failed to send `XdndStatus` message.");
+            }
             // TODO: Ensure that this is sent after `dnd` lock is released, to prevent
             // accidentally introducing a deadlock later down the line.
             app.window_event(&self.target, window_id, WindowEvent::DragDropped {
@@ -562,7 +566,7 @@ impl EventProcessor {
             });
 
             unsafe {
-                dnd.send_finished(window, source_window, state)
+                dnd.send_finished(window, source_window)
                     .expect("Failed to send `XdndFinished` message.");
             }
 
@@ -570,7 +574,7 @@ impl EventProcessor {
         }
 
         if xev.message_type == atoms[XdndLeave] as c_ulong {
-            let transfer_id = self.target.dnd.read().unwrap().transfer_id();
+            let transfer_id = self.target.dnd.borrow().transfer_id();
             app.window_event(&self.target, window_id, WindowEvent::DragLeft { id: transfer_id });
         }
     }
@@ -590,7 +594,7 @@ impl EventProcessor {
             return;
         }
 
-        let _ = unsafe { self.target.dnd.read().unwrap().read_data(window) };
+        let _ = unsafe { self.target.dnd.borrow().read_data(window) };
     }
 
     fn configure_notify(&self, xev: &XConfigureEvent, app: &mut dyn ApplicationHandler) {

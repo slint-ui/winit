@@ -3,6 +3,7 @@ use std::io;
 use std::marker::PhantomData;
 use std::os::raw::*;
 use std::str::Utf8Error;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::thread::ThreadId;
 
@@ -326,34 +327,56 @@ impl SelectionFetchState {
     }
 }
 
-#[derive(Debug)]
-pub struct Dnd {
-    xconn: Arc<XConnection>,
-    transfer_id: DataTransferId,
+#[derive(Default, Debug)]
+pub struct DndSharedState {
+    transfer_id: AtomicI64,
     /// Whether the drag operation is accepted (or `None` if the user never indicated that it's
     /// accepted or rejected)
     // Populated by `Window::accept_drag`/`Window::reject_drag`.
-    pub accepted: Option<bool>,
+    pub accepted: AtomicBool,
+}
+
+impl DndSharedState {
+    fn reset(&self) {
+        self.transfer_id.fetch_add(1, Ordering::Relaxed);
+        self.accepted.store(false, Ordering::Relaxed);
+    }
+
+    pub fn transfer_id(&self) -> DataTransferId {
+        DataTransferId::from_raw(self.transfer_id.load(Ordering::Relaxed))
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct DragState {
     // Populated by XdndEnter event handler
-    pub version: Option<c_long>,
-    pub types: Option<Vec<SelectionType>>,
+    pub version: c_long,
+    pub types: Arc<[SelectionType]>,
     // Populated by Xdnd* event handlers
-    pub source_window: Option<xproto::Window>,
+    pub source_window: xproto::Window,
     // Populated by Xdnd* event handlers
-    pub target_window: Option<xproto::Window>,
+    pub target_window: xproto::Window,
     // Populated by `fetch_data_transfer`
     pub last_fetched_selection: Option<SelectionFetchState>,
+}
+
+#[derive(Debug)]
+pub struct Dnd {
+    xconn: Arc<XConnection>,
+    pub shared: Arc<DndSharedState>,
     pub deadlock_sentinel: DeadlockSentinel,
+    // If `None`, no drag operation is in progress.
+    pub state: Option<DragState>,
 }
 
 #[derive(Debug)]
 pub struct Selection {
-    dnd: Arc<RwLock<Dnd>>,
+    types: Arc<[SelectionType]>,
 }
 
 impl Selection {
-    pub(crate) fn new(dnd: Arc<RwLock<Dnd>>) -> Selection {
-        Selection { dnd }
+    pub(crate) fn new(types: Arc<[SelectionType]>) -> Selection {
+        Selection { types }
     }
 }
 
@@ -422,107 +445,68 @@ impl TransferType for SelectionType {
 
 impl DataTransfer for Selection {
     fn available_types(&self) -> Vec<Box<dyn TransferType>> {
-        self.dnd
-            .read()
-            .unwrap()
-            .types
-            .as_ref()
-            .into_iter()
-            .flat_map(|types| types.iter().map(|val| Box::new(val.clone()) as _))
-            .collect()
+        self.types.iter().cloned().map(|val| Box::new(val) as _).collect()
     }
 
     fn has_type(&self, type_: &dyn TransferType) -> bool {
-        let dnd = self.dnd.read().unwrap();
-
-        let Some(types) = dnd.types.as_ref() else {
-            return false;
-        };
-
         if let Some(x11_type) = type_.cast_ref() {
-            types.iter().any(|haystack| haystack == x11_type)
+            self.types.iter().any(|haystack| haystack == x11_type)
         } else {
             let Some(hint) = type_.hint() else {
                 return false;
             };
 
-            types.iter().any(|haystack| haystack.hint().is_some_and(|hs| hs.matches(&hint)))
+            self.types.iter().any(|haystack| haystack.hint().is_some_and(|hs| hs.matches(&hint)))
         }
     }
 }
 
 impl Dnd {
-    pub fn new(xconn: Arc<XConnection>, sentinel: DeadlockSentinel) -> Self {
-        Self::with_id(xconn, sentinel, DataTransferId::from_raw(0))
+    pub fn new(xconn: Arc<XConnection>, deadlock_sentinel: DeadlockSentinel) -> Self {
+        let shared = Arc::new(Default::default());
+
+        Dnd { xconn, shared, state: None, deadlock_sentinel }
     }
 
     pub fn find_type_by_hint(&self, hint: TypeHint) -> Option<&SelectionType> {
-        self.types.as_ref()?.iter().find(|haystack| haystack.hint() == Some(hint))
-    }
-
-    fn with_id(
-        xconn: Arc<XConnection>,
-        deadlock_sentinel: DeadlockSentinel,
-        transfer_id: DataTransferId,
-    ) -> Self {
-        Dnd {
-            xconn,
-            transfer_id,
-            accepted: None,
-            version: None,
-            types: None,
-            source_window: None,
-            target_window: None,
-            last_fetched_selection: None,
-            deadlock_sentinel,
-        }
+        self.state.as_ref()?.types.iter().find(|haystack| haystack.hint() == Some(hint))
     }
 
     pub fn transfer_id(&self) -> DataTransferId {
-        self.transfer_id
+        DataTransferId::from_raw(self.shared.transfer_id.load(Ordering::Relaxed))
     }
 
     pub fn reset(&mut self) {
-        let xconn = self.xconn.clone();
-        let sentinel = std::mem::take(&mut self.deadlock_sentinel);
-        let new_id = DataTransferId::from_raw(self.transfer_id.into_raw().wrapping_add(1));
-        *self = Self::with_id(xconn, sentinel, new_id);
+        self.shared.reset();
+        self.state = None;
     }
 
-    pub unsafe fn send_status(
-        &self,
-        this_window: xproto::Window,
+    pub fn init_state(
+        &mut self,
+        version: c_long,
+        source_window: xproto::Window,
         target_window: xproto::Window,
-        state: DndState,
-    ) -> Result<(), X11Error> {
-        let atoms = self.xconn.atoms();
-        let (accepted, action) = match state {
-            DndState::Accepted => (1, atoms[XdndActionPrivate]),
-            DndState::Rejected => (0, atoms[DndNone]),
-        };
-        self.xconn
-            .send_client_msg(target_window, target_window, atoms[XdndStatus] as _, None, [
-                this_window,
-                accepted,
-                0,
-                0,
-                action as _,
-            ])?
-            .ignore_error();
-
-        Ok(())
+        types: Arc<[SelectionType]>,
+    ) -> &DragState {
+        self.state.get_or_insert(DragState {
+            version,
+            types,
+            source_window,
+            target_window,
+            last_fetched_selection: None,
+        })
     }
 
     pub unsafe fn send_finished(
         &self,
         this_window: xproto::Window,
         target_window: xproto::Window,
-        state: DndState,
     ) -> Result<(), X11Error> {
         let atoms = self.xconn.atoms();
-        let (accepted, action) = match state {
-            DndState::Accepted => (1, atoms[XdndActionPrivate]),
-            DndState::Rejected => (0, atoms[DndNone]),
+        let (accepted, action) = if self.shared.accepted.load(Ordering::Relaxed) {
+            (1, atoms[XdndActionPrivate])
+        } else {
+            (0, atoms[DndNone])
         };
         self.xconn
             .send_client_msg(target_window, target_window, atoms[XdndFinished] as _, None, [
@@ -564,20 +548,41 @@ impl Dnd {
             .expect_then_ignore_error("Failed to send XdndSelection event")
     }
 
+    pub unsafe fn send_status(
+        &self,
+        this_window: xproto::Window,
+        target_window: xproto::Window,
+        status: DndState,
+    ) -> Result<(), X11Error> {
+        let atoms = self.xconn.atoms();
+        let (accepted, action) = match status {
+            DndState::Accepted => (1, atoms[XdndActionPrivate]),
+            DndState::Rejected => (0, atoms[DndNone]),
+        };
+        self.xconn
+            .send_client_msg(target_window, target_window, atoms[XdndStatus] as _, None, [
+                this_window,
+                accepted,
+                0,
+                0,
+                action as _,
+            ])?
+            .ignore_error();
+
+        Ok(())
+    }
     pub unsafe fn read_data(&self, window: xproto::Window) -> Result<(), util::GetPropertyError> {
+        let state = self.state.as_ref().ok_or(util::GetPropertyError::Unknown)?;
+
         // Never fetched
-        let data =
-            self.last_fetched_selection.as_ref().ok_or_else(|| util::GetPropertyError::Unknown)?;
+        let last_fetch =
+            state.last_fetched_selection.as_ref().ok_or(util::GetPropertyError::Unknown)?;
 
         let atoms = self.xconn.atoms();
-        let type_ = self
-            .last_fetched_selection
-            .as_ref()
-            .map(|state| state.type_.atom())
-            .ok_or(util::GetPropertyError::Unknown)?;
+        let type_ = last_fetch.type_.atom();
         let bytes = self.xconn.get_property(window, atoms[XdndSelection], type_)?;
 
-        data.value.write(bytes.into()).map_err(|_| util::GetPropertyError::Unknown)?;
+        last_fetch.value.write(bytes.into()).map_err(|_| util::GetPropertyError::Unknown)?;
 
         Ok(())
     }

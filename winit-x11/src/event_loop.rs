@@ -7,7 +7,7 @@ use std::os::raw::*;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, LazyLock, Mutex, RwLock, Weak};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::{Duration, Instant};
 use std::{fmt, mem, ptr, slice, str};
 
@@ -169,7 +169,7 @@ impl<T> PeekableReceiver<T> {
 #[derive(Debug)]
 pub struct ActiveEventLoop {
     pub(crate) xconn: Arc<XConnection>,
-    pub(crate) dnd: Arc<RwLock<Dnd>>,
+    pub(crate) dnd: RefCell<Dnd>,
     pub(crate) wm_delete_window: xproto::Atom,
     pub(crate) net_wm_ping: xproto::Atom,
     pub(crate) net_wm_sync_request: xproto::Atom,
@@ -228,8 +228,7 @@ impl EventLoop {
         let net_wm_ping = atoms[_NET_WM_PING];
         let net_wm_sync_request = atoms[_NET_WM_SYNC_REQUEST];
 
-        let dnd = Dnd::new(Arc::clone(&xconn), Default::default());
-        let dnd = Arc::new(RwLock::new(dnd));
+        let dnd = Dnd::new(Arc::clone(&xconn), Default::default()).into();
 
         let (ime_sender, ime_receiver) = mpsc::channel();
         let (ime_event_sender, ime_event_receiver) = mpsc::channel();
@@ -667,7 +666,7 @@ impl ActiveEventLoop {
     }
 
     pub(crate) fn selection_deadlock_guard(&self) -> DeadlockSentinelGuard {
-        self.dnd.read().unwrap().deadlock_sentinel.guard()
+        self.dnd.borrow().deadlock_sentinel.guard()
     }
 
     /// Update the device event based on window focus.
@@ -768,11 +767,17 @@ impl RootActiveEventLoop for ActiveEventLoop {
     }
 
     fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
-        if self.dnd.read().unwrap().transfer_id() != id {
+        let dnd = self.dnd.borrow();
+
+        if dnd.transfer_id() != id {
             return Err(RequestError::Ignored);
         }
 
-        Ok(Box::new(Selection::new(self.dnd.clone())))
+        let Some(state) = dnd.state.as_ref() else {
+            return Err(RequestError::Ignored);
+        };
+
+        Ok(Box::new(Selection::new(state.types.clone())))
     }
 
     fn fetch_data_transfer(
@@ -780,48 +785,50 @@ impl RootActiveEventLoop for ActiveEventLoop {
         id: DataTransferId,
         type_: &dyn TransferType,
     ) -> Result<Box<dyn TypedData>, RequestError> {
-        let mut dnd = self.dnd.write().unwrap();
+        let mut dnd = self.dnd.borrow_mut();
+
         if dnd.transfer_id() != id {
             return Err(RequestError::NotSupported(NotSupportedError::new(
                 "Unknown data transfer",
             )));
         }
 
-        if dnd.source_window.is_none() {
-            return Err(RequestError::NotSupported(NotSupportedError::new(
-                "Unknown source window",
-            )));
-        }
-
-        let Some(window) = dnd.target_window else {
-            return Err(RequestError::NotSupported(NotSupportedError::new(
-                "Unknown target window",
-            )));
-        };
-
         let type_ = type_
             .cast_ref::<SelectionType>()
             .or_else(|| dnd.find_type_by_hint(type_.hint()?))
             .cloned()
             .ok_or(RequestError::NotSupported(NotSupportedError::new("Unknown type hint")))?;
-
-        let mut new_state =
-            dnd.last_fetched_selection.take().filter(|state| state.type_() == &type_);
-
         let deadlock_sentinel = dnd.deadlock_sentinel.reader();
+
+        let mut new_state = dnd
+            .state
+            .as_mut()
+            .ok_or(RequestError::Ignored)?
+            .last_fetched_selection
+            .take()
+            .filter(|state| state.type_() == &type_);
+
+        let Some(target_window) = dnd.state.as_ref().map(|s| s.target_window) else {
+            return Err(RequestError::Ignored);
+        };
+
         let reader = new_state
             .get_or_insert_with(|| {
                 // This results in the `SelectionNotify` event
                 unsafe {
                     // TODO: Handle this better
-                    dnd.convert_selection(window, self.xconn.timestamp(), type_.atom());
+                    dnd.convert_selection(target_window, self.xconn.timestamp(), type_.atom());
                 }
 
                 SelectionFetchState::new(type_)
             })
             .as_reader(deadlock_sentinel);
 
-        dnd.last_fetched_selection = new_state;
+        let Some(state) = dnd.state.as_mut() else {
+            return Err(RequestError::Ignored);
+        };
+
+        state.last_fetched_selection = new_state;
 
         Ok(Box::new(reader))
     }

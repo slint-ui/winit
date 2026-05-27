@@ -5,7 +5,8 @@ use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::os::raw::*;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::{cmp, env};
 
 use dpi::{PhysicalInsets, PhysicalPosition, PhysicalSize, Position, Size};
@@ -32,8 +33,15 @@ use x11rb::protocol::sync::{ConnectionExt as _, Int64};
 use x11rb::protocol::xproto::{self, ClipOrdering, ConnectionExt as _, Rectangle};
 use x11rb::protocol::{randr, xinput};
 
-use crate::atoms::*;
-use crate::dnd::{Dnd, DndState};
+use crate::atoms::{
+    _GTK_THEME_VARIANT, _NET_ACTIVE_WINDOW, _NET_WM_ICON, _NET_WM_MOVERESIZE, _NET_WM_NAME,
+    _NET_WM_PID, _NET_WM_PING, _NET_WM_STATE, _NET_WM_STATE_ABOVE, _NET_WM_STATE_BELOW,
+    _NET_WM_STATE_FULLSCREEN, _NET_WM_STATE_HIDDEN, _NET_WM_STATE_MAXIMIZED_HORZ,
+    _NET_WM_STATE_MAXIMIZED_VERT, _NET_WM_SYNC_REQUEST, _NET_WM_SYNC_REQUEST_COUNTER,
+    _NET_WM_WINDOW_TYPE, _XEMBED, AtomName, CARD32, UTF8_STRING, WM_CHANGE_STATE,
+    WM_CLIENT_MACHINE, WM_DELETE_WINDOW, WM_PROTOCOLS, WM_STATE, XdndAware,
+};
+use crate::dnd::DndSharedState;
 use crate::event_loop::{
     ALL_MASTER_DEVICES, ActivationItem, ActiveEventLoop, CookieResultExt, ICONIC_STATE, VoidCookie,
     WakeSender, X11Error, xinput_fp1616_to_float,
@@ -306,62 +314,21 @@ impl CoreWindow for Window {
     }
 
     fn reject_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
-        let mut dnd = self.dnd.write().unwrap();
-        if dnd.transfer_id() != id {
+        if self.dnd_shared.transfer_id() != id {
             return Err(UnknownDataTransfer(id));
         }
 
-        if dnd.accepted == Some(false) {
-            return Ok(());
-        }
-
-        dnd.accepted = Some(false);
-
-        let Some(source_window) = dnd.source_window else {
-            // TODO: Should have "other error" since this isn't an unknown data transfer.
-            return Err(UnknownDataTransfer(id));
-        };
-
-        let Some(window) = dnd.target_window else {
-            // TODO: Should have "other error" since this isn't an unknown data transfer.
-            return Err(UnknownDataTransfer(id));
-        };
-
-        unsafe {
-            dnd.send_status(window, source_window, DndState::Rejected)
-                .expect("Failed to send `XdndStatus` message.");
-        }
-        dnd.reset();
+        self.dnd_shared.accepted.store(false, Ordering::Relaxed);
 
         Ok(())
     }
 
     fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
-        let mut dnd = self.dnd.write().unwrap();
-        if dnd.transfer_id() != id {
+        if self.dnd_shared.transfer_id() != id {
             return Err(UnknownDataTransfer(id));
         }
 
-        if dnd.accepted == Some(true) {
-            return Ok(());
-        }
-
-        dnd.accepted = Some(true);
-
-        let Some(source_window) = dnd.source_window else {
-            // TODO: Should have "other error" since this isn't an unknown data transfer.
-            return Err(UnknownDataTransfer(id));
-        };
-
-        let Some(window) = dnd.target_window else {
-            // TODO: Should have "other error" since this isn't an unknown data transfer.
-            return Err(UnknownDataTransfer(id));
-        };
-
-        unsafe {
-            dnd.send_status(window, source_window, DndState::Accepted)
-                .expect("Failed to send `XdndStatus` message.");
-        }
+        self.dnd_shared.accepted.store(true, Ordering::Relaxed);
 
         Ok(())
     }
@@ -476,7 +443,7 @@ unsafe impl Sync for UnownedWindow {}
 #[derive(Debug)]
 pub struct UnownedWindow {
     pub(crate) xconn: Arc<XConnection>, // never changes
-    dnd: Arc<RwLock<Dnd>>,
+    dnd_shared: Arc<DndSharedState>,
     xwindow: xproto::Window, // never changes
     #[allow(dead_code)]
     visual: u32, // never changes
@@ -702,12 +669,12 @@ impl UnownedWindow {
             .visual;
         }
 
-        let dnd = event_loop.dnd.clone();
+        let dnd_shared = event_loop.dnd.borrow().shared.clone();
 
         #[allow(clippy::mutex_atomic)]
         let mut window = UnownedWindow {
             xconn: Arc::clone(xconn),
-            dnd,
+            dnd_shared,
             xwindow: xwindow as xproto::Window,
             visual,
             root,
