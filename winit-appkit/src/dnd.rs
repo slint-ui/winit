@@ -297,11 +297,6 @@ impl TypedData for PasteboardValue {
             .map(|ns_str| ns_str.to_string())
             .ok_or_else(|| io::ErrorKind::InvalidData.into())
     }
-
-    fn wait_for_data(&self) -> io::Result<()> {
-        // The methods on `NSPasteboard` already wait without danger of deadlock
-        Ok(())
-    }
 }
 
 #[derive(Debug, Default)]
