@@ -446,7 +446,7 @@ impl DataTransfer for Selection {
                 return false;
             };
 
-            types.iter().any(|haystack| haystack.hint() == Some(hint))
+            types.iter().any(|haystack| haystack.hint().is_some_and(|hs| hs.matches(&hint)))
         }
     }
 }

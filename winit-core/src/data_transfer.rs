@@ -102,6 +102,36 @@ pub enum TypeHint {
     },
 }
 
+impl TypeHint {
+    /// Check whether the two type hints "match".
+    ///
+    /// This is subtly different to direct equality. If one of the types is an image or audio with a
+    /// `None` extension hint, then the other type just needs to match variant (i.e. image/audio),
+    /// the extension does not also have to be `None`.
+    pub fn matches(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Plaintext, Self::Plaintext)
+            | (Self::UriList, Self::UriList)
+            | (Self::Html, Self::Html)
+            | (Self::Rtf, Self::Rtf) => true,
+
+            (
+                Self::Audio { extension_hint: this_ext },
+                Self::Audio { extension_hint: other_ext },
+            )
+            | (
+                Self::Image { extension_hint: this_ext },
+                Self::Image { extension_hint: other_ext },
+            ) => match (this_ext, other_ext) {
+                (Some(this_ext), Some(other_ext)) => this_ext == other_ext,
+                (None, _) | (_, None) => true,
+            },
+
+            _ => false,
+        }
+    }
+}
+
 /// The type of a data transfer.
 ///
 /// [`hint`](TransferType::hint) can be called to get the type in

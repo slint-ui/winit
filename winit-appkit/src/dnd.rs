@@ -35,7 +35,7 @@ impl PasteboardType {
         };
 
         hint_to_pasteboard_type.into_iter().find_map(|(haystack, inner)| {
-            (haystack == hint).then(|| Self { hint: Some(hint), inner: inner.retain() })
+            (haystack.matches(hint)).then(|| Self { hint: Some(hint), inner: inner.retain() })
         })
     }
 }
@@ -52,7 +52,8 @@ impl From<Retained<NSPasteboardType>> for PasteboardType {
     fn from(value: Retained<NSPasteboardType>) -> Self {
         let pasteboard_type_to_hint = unsafe {
             [
-                // Just in case the source application uses the deprecated method, we handle it here
+                // Just in case the source application uses the deprecated method, we handle it
+                // here
                 #[expect(deprecated)]
                 (objc2_app_kit::NSFilenamesPboardType, TypeHint::UriList),
                 (NSPasteboardTypeFileURL, TypeHint::UriList),
