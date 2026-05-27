@@ -26,8 +26,6 @@ use objc2_app_kit::{
     NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode,
     NSWindowTitleVisibility, NSWindowToolbarStyle,
 };
-#[allow(deprecated)]
-use objc2_app_kit::{NSFilenamesPboardType, NSWindowFullScreenButton};
 use objc2_core_foundation::{CGFloat, CGPoint};
 use objc2_core_graphics::{
     CGAcquireDisplayFadeReservation, CGAssociateMouseAndMouseCursorPosition, CGDisplayCapture,
@@ -697,7 +695,7 @@ fn new_window(
         if macos_attrs.titlebar_buttons_hidden {
             for titlebar_button in &[
                 #[allow(deprecated)]
-                NSWindowFullScreenButton,
+                objc2_app_kit::NSWindowFullScreenButton,
                 NSWindowButton::MiniaturizeButton,
                 NSWindowButton::CloseButton,
                 NSWindowButton::ZoomButton,

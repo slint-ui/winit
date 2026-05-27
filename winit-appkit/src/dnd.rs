@@ -52,6 +52,7 @@ impl From<Retained<NSPasteboardType>> for PasteboardType {
     fn from(value: Retained<NSPasteboardType>) -> Self {
         let pasteboard_type_to_hint = unsafe {
             [
+                // Just in case the source application uses the deprecated method, we handle it here
                 #[expect(deprecated)]
                 (objc2_app_kit::NSFilenamesPboardType, TypeHint::UriList),
                 (NSPasteboardTypeFileURL, TypeHint::UriList),
