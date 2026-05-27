@@ -433,10 +433,6 @@ impl EventProcessor {
             // never contending the lock.
             let transfer_id = {
                 let mut dnd = self.target.dnd.borrow_mut();
-                // We only reset when a new drag-and-drop enters, to maximize the amount of time
-                // that the drag data can be accessed.
-                dnd.reset();
-
                 let source_window = xev.data.get_long(0) as xproto::Window;
                 let flags = xev.data.get_long(1);
 
@@ -541,34 +537,26 @@ impl EventProcessor {
         }
 
         if xev.message_type == atoms[XdndDrop] as c_ulong {
-            let dnd = self.target.dnd.borrow();
-            let Some(source_window) = dnd.state.as_ref().map(|s| s.source_window) else {
-                warn!("Received `XdndDrop` without `XdndEnter`");
-                return;
+            let (source_window, transfer_id) = {
+                let dnd = self.target.dnd.borrow();
+                let Some(source_window) = dnd.state.as_ref().map(|s| s.source_window) else {
+                    warn!("Received `XdndDrop` without `XdndEnter`");
+                    return;
+                };
+
+                (source_window, dnd.transfer_id())
             };
 
-            unsafe {
-                dnd.send_status(
-                    window,
-                    source_window,
-                    if dnd.shared.accepted.load(Ordering::Relaxed) {
-                        DndState::Accepted
-                    } else {
-                        DndState::Rejected
-                    },
-                )
-                .expect("Failed to send `XdndStatus` message.");
-            }
-            // TODO: Ensure that this is sent after `dnd` lock is released, to prevent
-            // accidentally introducing a deadlock later down the line.
-            app.window_event(&self.target, window_id, WindowEvent::DragDropped {
-                id: dnd.transfer_id(),
-            });
+            app.window_event(&self.target, window_id, WindowEvent::DragDropped { id: transfer_id });
+
+            let mut dnd = self.target.dnd.borrow_mut();
 
             unsafe {
                 dnd.send_finished(window, source_window)
                     .expect("Failed to send `XdndFinished` message.");
             }
+
+            dnd.reset();
 
             return;
         }
