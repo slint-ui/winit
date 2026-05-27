@@ -108,6 +108,7 @@ pub(crate) struct SharedDataReader {
 
 impl SharedDataReader {
     fn try_data(&self) -> io::Result<&[u8]> {
+        self.wait_for_data()?;
         self.reader.try_data()
     }
 
@@ -299,10 +300,6 @@ impl TypedData for SelectionReader {
             .filter(|s| !s.is_empty())
             .map(Into::into)
             .collect())
-    }
-
-    fn wait_for_data(&self) -> io::Result<()> {
-        self.data.wait_for_data()
     }
 }
 

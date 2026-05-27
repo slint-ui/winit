@@ -188,16 +188,6 @@ pub trait TypedData: AsAny + fmt::Debug {
     ///
     /// If this value is not readable as a string, return `None`.
     fn try_as_string(&mut self) -> io::Result<String>;
-
-    /// Block the current thread until the data is fully available, or until the data is
-    /// invalidated.
-    ///
-    /// Note that this doesn't mean that other methods will return `Ok`, simply that they won't
-    /// return `io::Error::WouldBlock`.
-    ///
-    /// If the data is ready to be read, return `Ok(())`. If this data has been invalidated (and
-    /// therefore this would wait forever), return `Err`.
-    fn wait_for_data(&self) -> io::Result<()>;
 }
 
 impl_dyn_casting!(TypedData);

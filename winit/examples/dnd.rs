@@ -63,11 +63,6 @@ impl ApplicationHandler for Application {
                 info!("{event:?}");
 
                 if let Some(data) = &mut self.last_dnd_fetch {
-                    // This may return an error with `io::ErrorKind::Deadlock` on X11 if
-                    // this is called in the event loop thread while the application is
-                    // still waiting for data.
-                    data.wait_for_data().unwrap();
-
                     match data.type_().hint() {
                         Some(TypeHint::Plaintext | TypeHint::Html) => {
                             let text = data.try_as_string().unwrap();
@@ -121,9 +116,12 @@ impl ApplicationHandler for Application {
 
                 self.last_dnd_fetch = event_loop.fetch_data_transfer(id, &type_).ok();
 
-                match self.last_dnd_fetch.as_ref().unwrap().wait_for_data() {
+                match self.last_dnd_fetch.as_mut().unwrap().try_as_string() {
                     Err(e) if e.kind() == std::io::ErrorKind::Deadlock => {
-                        warn!("Immediately waiting for a fetched data transfer may deadlock!");
+                        warn!(
+                            "Immediately waiting for a fetched data transfer may deadlock on some \
+                             platforms!"
+                        );
                     },
                     _ => {},
                 }
