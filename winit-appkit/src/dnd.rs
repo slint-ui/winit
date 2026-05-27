@@ -35,7 +35,7 @@ impl PasteboardType {
         };
 
         hint_to_pasteboard_type.into_iter().find_map(|(haystack, inner)| {
-            (haystack.matches(hint)).then(|| Self { hint: Some(hint), inner: inner.retain() })
+            (haystack.matches(&hint)).then(|| Self { hint: Some(hint), inner: inner.retain() })
         })
     }
 }
