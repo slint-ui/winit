@@ -1,4 +1,4 @@
-use std::sync::MutexGuard;
+use std::sync::{Arc, MutexGuard};
 use std::{fmt, io, ptr};
 
 use bitflags::bitflags;
@@ -22,7 +22,8 @@ use winit_core::keyboard::ModifiersState;
 use winit_core::monitor::Fullscreen;
 use winit_core::window::{ImeCapabilities, Theme, WindowAttributes};
 
-use crate::{SelectedCursor, event_loop, util};
+use crate::drop_handler::FileDropDataShared;
+use crate::{SelectedCursor, WindowAttributesWindows, event_loop, util};
 
 /// Contains information about states and the window that the callback is going to use.
 #[derive(Debug)]
@@ -62,6 +63,8 @@ pub(crate) struct WindowState {
     pub redraw_requested: bool,
 
     pub dragging: bool,
+
+    pub drop_data_shared: Option<Arc<FileDropDataShared>>,
 
     pub skip_taskbar: bool,
 
@@ -154,6 +157,7 @@ pub enum ImeState {
 impl WindowState {
     pub(crate) fn new(
         attributes: &WindowAttributes,
+        win_attributes: &WindowAttributesWindows,
         scale_factor: f64,
         current_theme: Theme,
         preferred_theme: Option<Theme>,
@@ -193,6 +197,8 @@ impl WindowState {
             redraw_requested: false,
 
             dragging: false,
+
+            drop_data_shared: win_attributes.drag_and_drop.clone(),
 
             skip_taskbar: false,
 

@@ -2,7 +2,8 @@ use std::ffi::{OsString, c_void};
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 
 use dpi::PhysicalPosition;
 use tracing::debug;
@@ -19,19 +20,43 @@ use crate::definitions::{
     IDataObject, IDataObjectVtbl, IDropTarget, IDropTargetVtbl, IUnknown, IUnknownVtbl,
 };
 
+#[derive(Default, Debug)]
+pub struct FileDropDataShared {
+    transfer_id: AtomicI64,
+    pub accepted: AtomicBool,
+}
+
+impl FileDropDataShared {
+    pub fn transfer_id(&self) -> DataTransferId {
+        DataTransferId::from_raw(self.transfer_id.load(Ordering::Relaxed))
+    }
+}
+
+#[allow(dead_code, reason = "TODO")]
+#[repr(C)]
+pub struct DataObjectData {
+    pub interface: IDataObject,
+    refcount: AtomicUsize,
+}
+
+#[allow(dead_code, reason = "TODO")]
+pub struct DataObject {
+    data: *mut DataObjectData,
+}
+
 #[repr(C)]
 pub struct FileDropHandlerData {
-    pub interface: IDropTarget,
+    interface: IDropTarget,
     refcount: AtomicUsize,
     window: HWND,
     send_event: Box<dyn Fn(WindowEvent)>,
-    accepted: bool,
+    shared: Arc<FileDropDataShared>,
     active_data_transfer_id: Option<DataTransferId>,
 }
 
 impl FileDropHandlerData {
     fn cursor_effect(&self) -> u32 {
-        if self.accepted {
+        if self.shared.accepted.load(Ordering::Relaxed) {
             // TODO: Handle other kinds of drop effect
             DROPEFFECT_COPY
         } else {
@@ -41,31 +66,33 @@ impl FileDropHandlerData {
 }
 
 pub struct FileDropHandler {
-    pub data: *mut FileDropHandlerData,
+    data: *mut FileDropHandlerData,
 }
 
 #[allow(non_snake_case)]
 impl FileDropHandler {
-    pub(crate) fn new(window: HWND, send_event: Box<dyn Fn(WindowEvent)>) -> FileDropHandler {
+    pub(crate) fn new(
+        window: HWND,
+        shared: Arc<FileDropDataShared>,
+        send_event: Box<dyn Fn(WindowEvent)>,
+    ) -> FileDropHandler {
         let data = Box::new(FileDropHandlerData {
             interface: IDropTarget { lpVtbl: &DROP_TARGET_VTBL as *const IDropTargetVtbl },
             refcount: AtomicUsize::new(1),
             window,
             send_event,
             active_data_transfer_id: None,
-            accepted: false,
+            shared,
         });
         FileDropHandler { data: Box::into_raw(data) }
     }
 
-    #[expect(dead_code, reason = "TODO")]
-    pub(crate) fn set_accepted(&mut self, accepted: bool) {
-        let drop_handler_data = unsafe { Self::from_interface(self.data) };
-        drop_handler_data.accepted = accepted;
+    pub(crate) unsafe fn interface_unchecked_mut(&mut self) -> &mut IDropTarget {
+        unsafe { &mut (*self.data).interface }
     }
 
     // Implement IUnknown
-    pub unsafe extern "system" fn QueryInterface(
+    unsafe extern "system" fn QueryInterface(
         _this: *mut IUnknown,
         _riid: *const GUID,
         _ppvObject: *mut *mut c_void,
@@ -75,13 +102,13 @@ impl FileDropHandler {
         unimplemented!();
     }
 
-    pub unsafe extern "system" fn AddRef(this: *mut IUnknown) -> u32 {
+    unsafe extern "system" fn AddRef(this: *mut IUnknown) -> u32 {
         let drop_handler_data = unsafe { Self::from_interface(this) };
         let count = drop_handler_data.refcount.fetch_add(1, Ordering::Release) + 1;
         count as u32
     }
 
-    pub unsafe extern "system" fn Release(this: *mut IUnknown) -> u32 {
+    unsafe extern "system" fn Release(this: *mut IUnknown) -> u32 {
         let drop_handler = unsafe { Self::from_interface(this) };
         let count = drop_handler.refcount.fetch_sub(1, Ordering::Release) - 1;
         if count == 0 {
@@ -91,7 +118,7 @@ impl FileDropHandler {
         count as u32
     }
 
-    pub unsafe extern "system" fn DragEnter(
+    unsafe extern "system" fn DragEnter(
         this: *mut IDropTarget,
         _pDataObj: *const IDataObject,
         _grfKeyState: u32,
@@ -120,7 +147,7 @@ impl FileDropHandler {
         S_OK
     }
 
-    pub unsafe extern "system" fn DragOver(
+    unsafe extern "system" fn DragOver(
         this: *mut IDropTarget,
         _grfKeyState: u32,
         pt: POINTL,
@@ -148,7 +175,7 @@ impl FileDropHandler {
         S_OK
     }
 
-    pub unsafe extern "system" fn DragLeave(this: *mut IDropTarget) -> HRESULT {
+    unsafe extern "system" fn DragLeave(this: *mut IDropTarget) -> HRESULT {
         let drop_handler = unsafe { Self::from_interface(this) };
         let Some(data_transfer_id) = drop_handler.active_data_transfer_id else {
             return E_ABORT;
@@ -159,7 +186,7 @@ impl FileDropHandler {
         S_OK
     }
 
-    pub unsafe extern "system" fn Drop(
+    unsafe extern "system" fn Drop(
         this: *mut IDropTarget,
         _pDataObj: *const IDataObject,
         _grfKeyState: u32,
@@ -194,7 +221,7 @@ impl FileDropHandler {
         unsafe { &mut *(this as *mut _) }
     }
 
-    #[expect(dead_code, reason = "TODO")]
+    #[allow(dead_code, reason = "TODO")]
     unsafe fn iterate_filenames<F>(data_obj: *const IDataObject, mut callback: F) -> Option<HDROP>
     where
         F: FnMut(PathBuf),

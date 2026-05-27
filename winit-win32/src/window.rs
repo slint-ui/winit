@@ -3,6 +3,7 @@ use std::cell::Cell;
 use std::ffi::c_void;
 use std::mem::{self, MaybeUninit};
 use std::rc::Rc;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::{io, panic, ptr};
@@ -48,13 +49,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_SYSCOMMAND, WNDCLASSEXW,
 };
 use winit_core::cursor::Cursor;
+use winit_core::data_transfer::DataTransferId;
 use winit_core::error::RequestError;
 use winit_core::icon::{Icon, RgbaIcon};
 use winit_core::monitor::{Fullscreen, MonitorHandle as CoreMonitorHandle, MonitorHandleProvider};
 use winit_core::window::{
     CursorGrabMode, ImeCapabilities, ImeRequest, ImeRequestError, ResizeDirection, Theme,
-    UserAttentionType, Window as CoreWindow, WindowAttributes, WindowButtons, WindowId,
-    WindowLevel,
+    UnknownDataTransfer, UserAttentionType, Window as CoreWindow, WindowAttributes, WindowButtons,
+    WindowId, WindowLevel,
 };
 
 use crate::dark_mode::try_theme;
@@ -1158,6 +1160,36 @@ impl CoreWindow for Window {
     fn rwh_06_display_handle(&self) -> &dyn rwh_06::HasDisplayHandle {
         self
     }
+
+    fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
+        let state = self.window_state.lock().unwrap();
+        if let Some(shared) = &state.drop_data_shared {
+            if shared.transfer_id() != id {
+                return Err(UnknownDataTransfer(id));
+            }
+
+            shared.accepted.store(true, Ordering::Relaxed);
+
+            Ok(())
+        } else {
+            return Err(UnknownDataTransfer(id));
+        }
+    }
+
+    fn reject_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
+        let state = self.window_state.lock().unwrap();
+        if let Some(shared) = &state.drop_data_shared {
+            if shared.transfer_id() != id {
+                return Err(UnknownDataTransfer(id));
+            }
+
+            shared.accepted.store(true, Ordering::Relaxed);
+
+            Ok(())
+        } else {
+            return Err(UnknownDataTransfer(id));
+        }
+    }
 }
 
 pub(super) struct InitData<'a> {
@@ -1191,6 +1223,7 @@ impl InitData<'_> {
         let window_state = {
             let window_state = WindowState::new(
                 &self.attributes,
+                &self.win_attributes,
                 scale_factor,
                 current_theme,
                 self.attributes.preferred_theme,
@@ -1214,7 +1247,7 @@ impl InitData<'_> {
     }
 
     unsafe fn create_window_data(&self, win: &Window) -> event_loop::WindowData {
-        let file_drop_handler = if self.win_attributes.drag_and_drop {
+        let file_drop_handler = if let Some(shared) = self.win_attributes.drag_and_drop.clone() {
             let ole_init_result = unsafe { OleInitialize(ptr::null_mut()) };
             // It is ok if the initialize result is `S_FALSE` because it might happen that
             // multiple windows are created on the same thread.
@@ -1230,15 +1263,16 @@ impl InitData<'_> {
 
             let file_drop_runner = self.runner.clone();
             let window_id = win.id();
-            let file_drop_handler = FileDropHandler::new(
+            let mut file_drop_handler = FileDropHandler::new(
                 win.window.hwnd(),
+                shared,
                 Box::new(move |event| {
                     file_drop_runner.send_event(Event::Window { window_id, event })
                 }),
             );
 
             let handler_interface_ptr =
-                unsafe { &mut (*file_drop_handler.data).interface as *mut _ as *mut c_void };
+                unsafe { file_drop_handler.interface_unchecked_mut() as *mut _ as *mut c_void };
 
             assert_eq!(unsafe { RegisterDragDrop(win.window.hwnd(), handler_interface_ptr) }, S_OK);
             Some(file_drop_handler)

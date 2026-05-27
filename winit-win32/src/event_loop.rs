@@ -63,6 +63,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{CustomCursor, CustomCursorSource};
+use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypedData};
 use winit_core::error::{EventLoopError, NotSupportedError, RequestError};
 use winit_core::event::{
     DeviceEvent, DeviceId, FingerId, Force, Ime, RawKeyEvent, SurfaceSizeWriter, TabletToolButton,
@@ -477,6 +478,21 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
     fn rwh_06_handle(&self) -> &dyn rwh_06::HasDisplayHandle {
         self
+    }
+
+    fn fetch_data_transfer(
+        &self,
+        id: DataTransferId,
+        type_: &dyn TransferType,
+    ) -> Result<Box<dyn TypedData>, RequestError> {
+        let _ = id;
+        let _ = type_;
+        todo!()
+    }
+
+    fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
+        let _ = id;
+        todo!()
     }
 }
 

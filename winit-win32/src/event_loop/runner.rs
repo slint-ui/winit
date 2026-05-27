@@ -37,6 +37,8 @@ pub(crate) struct EventLoopRunner {
     event_handler: Rc<EventHandler>,
     event_buffer: RefCell<VecDeque<Event>>,
 
+    // TODO
+    // data_transfers_per_window: RefCell<HashMap<DataTransferId, Weak<FileDropDataShared>>>,
     panic_error: Cell<Option<PanicError>>,
 }
 
