@@ -8,8 +8,8 @@
 mod util;
 mod dark_mode;
 mod definitions;
+mod dnd;
 mod dpi;
-mod drop_handler;
 mod event_loop;
 mod icon;
 mod ime;
@@ -39,7 +39,7 @@ use self::icon::{RaiiIcon, SelectedCursor};
 pub use self::keyboard::{physicalkey_to_scancode, scancode_to_physicalkey};
 pub use self::monitor::{MonitorHandle, VideoModeHandle};
 pub use self::window::Window;
-use crate::drop_handler::FileDropDataShared;
+use crate::dnd::FileDropDataShared;
 
 /// Window Handle type used by Win32 API
 pub type HWND = *mut c_void;

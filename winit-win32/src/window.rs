@@ -63,8 +63,8 @@ use crate::dark_mode::try_theme;
 use crate::definitions::{
     CLSID_TaskbarList, IID_ITaskbarList, IID_ITaskbarList2, ITaskbarList, ITaskbarList2,
 };
+use crate::dnd::FileDropHandler;
 use crate::dpi::{dpi_to_scale_factor, enable_non_client_dpi_scaling, hwnd_dpi};
-use crate::drop_handler::FileDropHandler;
 use crate::event_loop::{self, ActiveEventLoop, DESTROY_MSG_ID, Event, EventLoopRunner};
 use crate::icon::{IconType, WinCursor};
 use crate::ime::ImeContext;

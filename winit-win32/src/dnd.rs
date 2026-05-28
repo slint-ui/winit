@@ -14,7 +14,7 @@ use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL
 use windows_sys::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_NONE};
 use windows_sys::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows_sys::core::{GUID, HRESULT};
-use winit_core::data_transfer::DataTransferId;
+use winit_core::data_transfer::{DataTransferId, TypeHint};
 use winit_core::event::WindowEvent;
 
 use crate::definitions::{

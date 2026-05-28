@@ -22,7 +22,7 @@ use winit_core::keyboard::ModifiersState;
 use winit_core::monitor::Fullscreen;
 use winit_core::window::{ImeCapabilities, Theme, WindowAttributes};
 
-use crate::drop_handler::FileDropDataShared;
+use crate::dnd::FileDropDataShared;
 use crate::{SelectedCursor, WindowAttributesWindows, event_loop, util};
 
 /// Contains information about states and the window that the callback is going to use.
