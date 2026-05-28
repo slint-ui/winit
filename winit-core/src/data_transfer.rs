@@ -43,7 +43,7 @@
 //! implementing the traits in this module, which can then be accessed in an application
 //! using the methods defined on [`dyn AsAny`]. See each platform's documentation for details.
 
-use std::borrow::Cow;
+use std::ffi::OsString;
 use std::fmt::{self, Debug};
 use std::io;
 use std::ops::ControlFlow;
