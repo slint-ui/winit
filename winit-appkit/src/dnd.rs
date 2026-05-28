@@ -1,5 +1,6 @@
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io;
 use std::ops::{ControlFlow, Deref};
 use std::rc::Rc;
@@ -273,7 +274,7 @@ impl TypedData for PasteboardValue {
             .map(|data| Box::new(DataReader::new(data)) as _)
     }
 
-    fn try_as_uris(&mut self) -> io::Result<Vec<String>> {
+    fn try_as_uris(&mut self) -> io::Result<Vec<OsString>> {
         // TODO: We should probably use `readObjects`, need to check how that works.
         if self.type_().hint() != Some(TypeHint::UriList) {
             return Err(io::ErrorKind::InvalidData.into());
@@ -299,7 +300,7 @@ impl TypedData for PasteboardValue {
                 .downcast::<NSArray>()
                 .unwrap()
                 .into_iter()
-                .map(|file| file.downcast::<NSString>().unwrap().to_string())
+                .map(|file| file.downcast::<NSString>().unwrap().to_string().into())
                 .collect();
 
             return Ok(paths);

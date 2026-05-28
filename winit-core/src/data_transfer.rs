@@ -182,7 +182,7 @@ pub trait TypedData: AsAny + fmt::Debug {
     ///
     /// The format of the returned URIs is simply a vector of strings. No validation is done
     /// to ensure that the URIs are valid or in the format
-    fn try_as_uris(&mut self) -> io::Result<Vec<String>>;
+    fn try_as_uris(&mut self) -> io::Result<Vec<OsString>>;
 
     /// Read this value as a plain text string.
     ///

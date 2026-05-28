@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::ffi::OsString;
 use std::io;
 use std::marker::PhantomData;
 use std::ops::ControlFlow;
@@ -290,7 +291,7 @@ impl TypedData for SelectionReader {
         }
     }
 
-    fn try_as_uris(&mut self) -> io::Result<Vec<String>> {
+    fn try_as_uris(&mut self) -> io::Result<Vec<OsString>> {
         if self.type_().hint() != Some(TypeHint::UriList) {
             return Err(io::ErrorKind::InvalidData.into());
         }
