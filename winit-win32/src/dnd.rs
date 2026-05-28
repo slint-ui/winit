@@ -140,19 +140,18 @@ unsafe fn read_uri_list(data_obj: *const IDataObject) -> Option<Vec<OsString>> {
 
     let mut paths = Vec::with_capacity(item_count as usize);
     for i in 0..item_count {
-        // Get the length of the path string NOT including the terminating null character.
-        // Previously, this was using a fixed size array of MAX_PATH length, but the Windows
-        // API allows longer paths under certain circumstances.
+        // Query the path length (excluding the NUL terminator), reserve room for it plus the
+        // terminator, then copy. `set_len` uses the count actually written, so a short copy can
+        // never expose uninitialized memory.
         let character_count = unsafe { DragQueryFileW(hdrop, i, std::ptr::null_mut(), 0) } as usize;
-        let str_len = character_count + 1;
 
-        let mut path_buf = Vec::<u16>::with_capacity(str_len);
-        unsafe {
-            DragQueryFileW(hdrop, i, path_buf.as_mut_ptr(), str_len as u32);
-            path_buf.set_len(str_len);
-        }
+        let mut path_buf = Vec::<u16>::with_capacity(character_count + 1);
+        let copied =
+            unsafe { DragQueryFileW(hdrop, i, path_buf.as_mut_ptr(), character_count as u32 + 1) }
+                as usize;
+        unsafe { path_buf.set_len(copied) };
 
-        paths.push(OsString::from_wide(&path_buf[..character_count]));
+        paths.push(OsString::from_wide(&path_buf));
     }
 
     Some(paths)
