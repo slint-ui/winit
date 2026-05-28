@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::{OsString, c_void};
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
@@ -32,16 +33,18 @@ impl FileDropDataShared {
     }
 }
 
-#[allow(dead_code, reason = "TODO")]
-#[repr(C)]
-pub struct DataObjectData {
-    pub interface: IDataObject,
-    refcount: AtomicUsize,
+enum DataKind {
+    Uris(Vec<String>),
+    String(String),
+    Bytes(Vec<u8>),
 }
 
-#[allow(dead_code, reason = "TODO")]
-pub struct DataObject {
-    data: *mut DataObjectData,
+struct DataObject {
+    // TODO: Exposing the full native API to client applications is too error-prone so long as
+    // winit is still manually implementing refcounting and using the win32 APIs. For now, we
+    // just eagerly read all the data supported by cross-platform type hints on Windows. This
+    // would be resolved by migrating to `windows-rs`.
+    data: HashMap<TypeHint, DataKind>,
 }
 
 #[repr(C)]

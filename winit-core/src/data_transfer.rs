@@ -43,8 +43,10 @@
 //! implementing the traits in this module, which can then be accessed in an application
 //! using the methods defined on [`dyn AsAny`]. See each platform's documentation for details.
 
+use std::borrow::Cow;
 use std::fmt::{self, Debug};
 use std::io;
+use std::ops::ControlFlow;
 
 use crate::as_any::AsAny;
 
@@ -162,13 +164,11 @@ impl_dyn_casting!(TransferType);
 ///
 /// ### Blocking
 ///
-/// Note that, in general, this type provides a _non-blocking_ interface. This means that the reader
-/// provided by [`try_read`](TypedData::try_read), as well other methods returning [`io::Result`],
-/// may return an error with [`io::ErrorKind::WouldBlock`]. To ensure that the `TypedData` is ready
-/// to read, the user may call [`wait_for_data`](TypedData::wait). This will block the current
-/// thread until the data is ready to read without returning `WouldBlock`. **This should not be
-/// called on the event handling thread**, as platforms may need to wait on OS events to populate
-/// the data.
+/// Note that this type provides a blocking interface. In cases where reading this type directly on
+/// the event loop would cause a deadlock, the backend will make a best-effort attempt to return an
+/// error with [`io::ErrorKind::Deadlock`]. For now, the only way to access the data is via blocking
+/// on the event loop, so simply retrying the next time an event is received that references the
+/// data transfer should be enough to ensure that the data is accessible.
 pub trait TypedData: AsAny + fmt::Debug {
     /// The type of this `TypedData`.
     fn type_(&self) -> &dyn TransferType;
@@ -197,13 +197,28 @@ impl_dyn_casting!(TypedData);
 /// [`Window::fetch_data_transfer`](crate::window::Window::fetch_data_transfer)
 /// and [`WindowEvent::DataTransferResult`](crate::event::WindowEvent::DataTransferResult).
 pub trait DataTransfer: AsAny + fmt::Debug {
+    /// Iterate over each type advertized by this `DataTransfer`. This is just a minor optimization,
+    /// in most cases you should probably use [`has_type`](DataTransfer::has_type) or
+    /// [`available_types`](DataTransfer::available_types).
+    fn for_each_available_type<'this>(
+        &'this self,
+        func: &'_ mut dyn FnMut(&'this dyn TransferType) -> ControlFlow<()>,
+    );
+
     /// Display the list of all available types.
     ///
     /// This is useful if more-complex type matching is required, but for most cases
     /// [`has_type`](DataTransfer::has_type) should be used.
-    // TODO: We should be able to do `&dyn TransferType`, but some implementation details in
-    // the platforms make that unnecessarily difficult right now. Specifically, use of `RwLock`.
-    fn available_types(&self) -> Vec<Box<dyn TransferType>>;
+    fn available_types(&self) -> Vec<&'_ dyn TransferType> {
+        let mut out = Vec::new();
+
+        self.for_each_available_type(&mut |ty| {
+            out.push(ty);
+            ControlFlow::Continue(())
+        });
+
+        out
+    }
 
     /// Check if the supplied type is provided by this [`DataTransfer`].
     ///
@@ -211,9 +226,18 @@ pub trait DataTransfer: AsAny + fmt::Debug {
     /// platform-specific type is required then that platform's implementation of `TransferType` can
     /// be used.
     fn has_type(&self, type_: &dyn TransferType) -> bool {
-        let available_types = self.available_types();
         type_.hint().is_some_and(|hint| {
-            available_types.iter().any(|haystack| haystack.hint() == Some(hint))
+            let mut found = false;
+            self.for_each_available_type(&mut |haystack| {
+                if haystack.hint() == Some(hint) {
+                    found = true;
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
+
+            found
         })
     }
 }

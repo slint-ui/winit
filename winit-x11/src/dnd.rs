@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::io;
 use std::marker::PhantomData;
+use std::ops::ControlFlow;
 use std::os::raw::*;
 use std::str::Utf8Error;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -441,8 +442,15 @@ impl TransferType for SelectionType {
 }
 
 impl DataTransfer for Selection {
-    fn available_types(&self) -> Vec<Box<dyn TransferType>> {
-        self.types.iter().cloned().map(|val| Box::new(val) as _).collect()
+    fn for_each_available_type<'this>(
+        &'this self,
+        func: &'_ mut dyn FnMut(&'this dyn TransferType) -> std::ops::ControlFlow<()>,
+    ) {
+        for ty in &self.types[..] {
+            if let ControlFlow::Break(()) = func(ty) {
+                break;
+            }
+        }
     }
 
     fn has_type(&self, type_: &dyn TransferType) -> bool {

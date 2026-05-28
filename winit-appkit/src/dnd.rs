@@ -1,7 +1,8 @@
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::io;
-use std::ops::Deref;
+use std::ops::{ControlFlow, Deref};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use objc2::Message;
@@ -84,6 +85,7 @@ impl TransferType for PasteboardType {
 pub struct Pasteboard {
     transfer_id: DataTransferId,
     inner: Retained<NSPasteboard>,
+    types: OnceCell<Rc<[PasteboardType]>>,
 }
 
 impl Deref for Pasteboard {
@@ -95,6 +97,26 @@ impl Deref for Pasteboard {
 }
 
 impl Pasteboard {
+    fn new(transfer_id: DataTransferId, pasteboard: Retained<NSPasteboard>) -> Self {
+        Self { transfer_id, inner: pasteboard, types: Default::default() }
+    }
+
+    /// Get the array of [`PasteboardType`]s advertized by this [`Pasteboard`].
+    pub fn types(&self) -> &[PasteboardType] {
+        self.types.get_or_init(|| {
+            self.inner
+                .types()
+                .map(|types| {
+                    types
+                        .into_iter()
+                        .map(|pb_type| PasteboardType::from(pb_type))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+                .into()
+        })
+    }
+
     /// Get the `DataTransferId` of this pasteboard.
     pub fn id(&self) -> DataTransferId {
         self.transfer_id
@@ -116,27 +138,26 @@ impl Pasteboard {
 }
 
 impl DataTransfer for Pasteboard {
-    fn available_types(&self) -> Vec<Box<dyn TransferType>> {
-        self.inner
-            .types()
-            .map(|types| {
-                types
-                    .into_iter()
-                    .map(|pb_type| Box::new(PasteboardType::from(pb_type)) as _)
-                    .collect()
-            })
-            .unwrap_or_default()
+    fn for_each_available_type<'this>(
+        &'this self,
+        func: &'_ mut dyn FnMut(&'this dyn TransferType) -> std::ops::ControlFlow<()>,
+    ) {
+        for ty in self.types() {
+            if let ControlFlow::Break(()) = func(ty) {
+                break;
+            }
+        }
     }
 
     fn has_type(&self, type_: &dyn TransferType) -> bool {
-        let Some(pb_types) = self.inner.types() else {
-            return false;
-        };
-
         if let Some(needle) = type_.cast_ref::<PasteboardType>().cloned() {
+            let Some(pb_types) = self.inner.types() else {
+                return false;
+            };
+
             pb_types.iter().any(|haystack| **needle == *haystack)
         } else if let Some(needle) = type_.hint() {
-            pb_types.iter().any(|haystack| PasteboardType::from(haystack).hint() == Some(needle))
+            self.types().iter().any(|haystack| haystack.hint() == Some(needle))
         } else {
             false
         }
@@ -329,10 +350,6 @@ impl DndState {
     }
 
     pub fn get(&self, id: DataTransferId) -> Option<Pasteboard> {
-        self.inner
-            .borrow()
-            .get(&id)
-            .and_then(|weak| weak.load())
-            .map(|pb| Pasteboard { transfer_id: id, inner: pb })
+        self.inner.borrow().get(&id).and_then(|weak| weak.load()).map(|pb| Pasteboard::new(id, pb))
     }
 }
