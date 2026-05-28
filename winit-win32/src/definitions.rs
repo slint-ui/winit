@@ -8,12 +8,12 @@ use windows_sys::Win32::System::Com::{FORMATETC, STGMEDIUM};
 use windows_sys::core::{BOOL, GUID, HRESULT};
 
 pub type IUnknown = *mut c_void;
-#[expect(dead_code, reason = "TODO")]
+#[allow(dead_code, reason = "part of the IDataObject vtable ABI; not called by winit")]
 pub type IAdviseSink = *mut c_void;
 pub type IDataObject = *mut c_void;
-#[expect(dead_code, reason = "TODO")]
+#[allow(dead_code, reason = "part of the IDataObject vtable ABI; not called by winit")]
 pub type IEnumFORMATETC = *mut c_void;
-#[expect(dead_code, reason = "TODO")]
+#[allow(dead_code, reason = "part of the IDataObject vtable ABI; not called by winit")]
 pub type IEnumSTATDATA = *mut c_void;
 
 #[repr(C)]
@@ -27,7 +27,10 @@ pub struct IUnknownVtbl {
     pub Release: unsafe extern "system" fn(This: *mut IUnknown) -> u32,
 }
 
-#[expect(dead_code, reason = "TODO")]
+#[allow(
+    dead_code,
+    reason = "the full vtable layout is required for ABI; not all methods are called"
+)]
 #[repr(C)]
 pub struct IDataObjectVtbl {
     pub parent: IUnknownVtbl,

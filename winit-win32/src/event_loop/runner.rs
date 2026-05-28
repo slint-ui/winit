@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -9,11 +9,13 @@ use std::{fmt, mem, panic};
 use dpi::PhysicalSize;
 use windows_sys::Win32::Foundation::HWND;
 use winit_core::application::ApplicationHandler;
+use winit_core::data_transfer::DataTransferId;
 use winit_core::event::{DeviceEvent, DeviceId, StartCause, SurfaceSizeWriter, WindowEvent};
 use winit_core::event_loop::ActiveEventLoop as RootActiveEventLoop;
 use winit_core::window::WindowId;
 
 use super::{ActiveEventLoop, ControlFlow, EventLoopThreadExecutor};
+use crate::dnd::DataObject;
 use crate::event_loop::{GWL_USERDATA, WindowData};
 use crate::util::get_window_long;
 
@@ -37,8 +39,11 @@ pub(crate) struct EventLoopRunner {
     event_handler: Rc<EventHandler>,
     event_buffer: RefCell<VecDeque<Event>>,
 
-    // TODO
-    // data_transfers_per_window: RefCell<HashMap<DataTransferId, Weak<FileDropDataShared>>>,
+    /// Drag-and-drop data, cached for the lifetime of each transfer (i.e. between `DragEntered`
+    /// and `DragLeft`/`DragDropped`). Looked up by [`Self::data_transfer`] to serve the
+    /// asynchronous `ActiveEventLoop` data-transfer API.
+    data_transfers: RefCell<HashMap<DataTransferId, Rc<DataObject>>>,
+
     panic_error: Cell<Option<PanicError>>,
 }
 
@@ -89,7 +94,20 @@ impl EventLoopRunner {
             last_events_cleared: Cell::new(Instant::now()),
             event_handler: Rc::new(Cell::new(None)),
             event_buffer: RefCell::new(VecDeque::new()),
+            data_transfers: RefCell::new(HashMap::new()),
         }
+    }
+
+    pub(crate) fn register_data_transfer(&self, id: DataTransferId, data: Rc<DataObject>) {
+        self.data_transfers.borrow_mut().insert(id, data);
+    }
+
+    pub(crate) fn remove_data_transfer(&self, id: DataTransferId) {
+        self.data_transfers.borrow_mut().remove(&id);
+    }
+
+    pub(crate) fn data_transfer(&self, id: DataTransferId) -> Option<Rc<DataObject>> {
+        self.data_transfers.borrow().get(&id).cloned()
     }
 
     /// Associate the application's event handler with the runner.
@@ -140,12 +158,14 @@ impl EventLoopRunner {
             last_events_cleared: _,
             event_handler,
             event_buffer: _,
+            data_transfers,
         } = self;
         interrupt_msg_dispatch.set(false);
         runner_state.set(RunnerState::Uninitialized);
         panic_error.set(None);
         exit.set(None);
         event_handler.set(None);
+        data_transfers.borrow_mut().clear();
     }
 }
 

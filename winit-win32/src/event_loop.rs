@@ -83,7 +83,7 @@ pub(super) use self::runner::{Event, EventLoopRunner};
 use super::SelectedCursor;
 use super::window::set_skip_taskbar;
 use crate::dark_mode::try_theme;
-use crate::dnd::FileDropHandler;
+use crate::dnd::{FileDropHandler, WinDataTransfer, WinTypedData};
 use crate::dpi::{become_dpi_aware, dpi_to_scale_factor};
 use crate::icon::WinCursor;
 use crate::ime::ImeContext;
@@ -485,14 +485,20 @@ impl RootActiveEventLoop for ActiveEventLoop {
         id: DataTransferId,
         type_: &dyn TransferType,
     ) -> Result<Box<dyn TypedData>, RequestError> {
-        let _ = id;
-        let _ = type_;
-        todo!()
+        let Some(data) = self.0.data_transfer(id) else {
+            return Err(RequestError::Ignored);
+        };
+        let hint = type_.hint().ok_or(RequestError::Ignored)?;
+
+        WinTypedData::new(data, hint).map(|value| Box::new(value) as _).ok_or(RequestError::Ignored)
     }
 
     fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
-        let _ = id;
-        todo!()
+        let Some(data) = self.0.data_transfer(id) else {
+            return Err(RequestError::Ignored);
+        };
+
+        Ok(Box::new(WinDataTransfer::new(data)))
     }
 }
 

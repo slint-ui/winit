@@ -3,7 +3,6 @@ use std::cell::Cell;
 use std::ffi::c_void;
 use std::mem::{self, MaybeUninit};
 use std::rc::Rc;
-use std::sync::atomic::Ordering;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::{io, panic, ptr};
@@ -49,14 +48,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_SYSCOMMAND, WNDCLASSEXW,
 };
 use winit_core::cursor::Cursor;
-use winit_core::data_transfer::DataTransferId;
 use winit_core::error::RequestError;
 use winit_core::icon::{Icon, RgbaIcon};
 use winit_core::monitor::{Fullscreen, MonitorHandle as CoreMonitorHandle, MonitorHandleProvider};
 use winit_core::window::{
     CursorGrabMode, ImeCapabilities, ImeRequest, ImeRequestError, ResizeDirection, Theme,
-    UnknownDataTransfer, UserAttentionType, Window as CoreWindow, WindowAttributes, WindowButtons,
-    WindowId, WindowLevel,
+    UserAttentionType, Window as CoreWindow, WindowAttributes, WindowButtons, WindowId, WindowLevel,
 };
 
 use crate::dark_mode::try_theme;
@@ -1237,6 +1234,7 @@ impl InitData<'_> {
             let window_id = win.id();
             let mut file_drop_handler = FileDropHandler::new(
                 win.window.hwnd(),
+                self.runner.clone(),
                 shared,
                 Box::new(move |event| {
                     file_drop_runner.send_event(Event::Window { window_id, event })

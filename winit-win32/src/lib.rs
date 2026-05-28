@@ -557,7 +557,7 @@ impl WindowAttributesWindows {
     /// does that, but there may be more in the future. If you need COM API with
     /// `COINIT_MULTITHREADED` you must initialize it before calling any winit functions. See <https://docs.microsoft.com/en-us/windows/win32/api/objbase/nf-objbase-coinitialize#remarks> for more information.
     pub fn with_drag_and_drop(mut self, flag: bool) -> Self {
-        self.drag_and_drop = flag.then(|| Default::default());
+        self.drag_and_drop = flag.then(Default::default);
         self
     }
 
