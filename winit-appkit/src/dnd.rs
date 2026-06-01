@@ -2,21 +2,21 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
-use std::ops::{ControlFlow, Deref};
+use std::ops::Deref;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicI64, Ordering};
 
 use objc2::Message;
 use objc2::rc::{Retained, Weak};
 use objc2_app_kit::{
-    NSPasteboard, NSPasteboardType, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
+    NSDragOperation, NSPasteboard, NSPasteboardType, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
     NSPasteboardTypePNG, NSPasteboardTypeSound, NSPasteboardTypeString, NSPasteboardTypeTIFF,
 };
 use objc2_foundation::{NSArray, NSData, NSString};
 use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypeHint, TypedData};
+use winit_core::event_loop::{DndActionMask, DndActions};
 
 /// A thin wrapper around [`NSPasteboardType`], implementing [`TransferType`].
-#[derive(Debug, Clone)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct PasteboardType {
     hint: Option<TypeHint>,
     // We need to convert `NSString` to `str` since `NSString` isn't `Send`/`Sync`
@@ -81,8 +81,8 @@ impl TransferType for PasteboardType {
     }
 
     fn matches(&self, other: &dyn TransferType) -> bool {
-        if let Some(other_mime) = other.cast_ref::<Self>() {
-            *self == *other_mime
+        if let Some(other_pb_type) = other.cast_ref::<Self>() {
+            *self == *other_pb_type
         } else {
             // If either hint is `None`, return false
             self.hint().is_some_and(|hint| other.hint() == Some(hint))
@@ -92,9 +92,9 @@ impl TransferType for PasteboardType {
 
 /// A thin wrapper around [`NSPasteboard`], implementing [`DataTransfer`].
 #[derive(Clone, Debug)]
-pub struct Pasteboard {
+pub struct Pasteboard<PB = Retained<NSPasteboard>> {
     transfer_id: DataTransferId,
-    inner: Retained<NSPasteboard>,
+    inner: PB,
     types: OnceCell<Rc<[PasteboardType]>>,
 }
 
@@ -116,12 +116,7 @@ impl Pasteboard {
         self.types.get_or_init(|| {
             self.inner
                 .types()
-                .map(|types| {
-                    types
-                        .into_iter()
-                        .map(|pb_type| PasteboardType::from(pb_type))
-                        .collect::<Vec<_>>()
-                })
+                .map(|types| types.into_iter().map(PasteboardType::from).collect::<Vec<_>>())
                 .unwrap_or_default()
                 .into()
         })
@@ -186,6 +181,65 @@ impl PasteboardTypeSpec {
             PasteboardTypeSpec::PasteboardType(pasteboard_type) => Some(pasteboard_type),
             PasteboardTypeSpec::TypeHint(_) => None,
         }
+    }
+}
+
+/// A thin wrapper around [`NSDragOperation`], implementing [`DndActionMask`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct DragOperation(pub NSDragOperation);
+
+impl DragOperation {
+    pub(crate) fn from_dyn(actions: &dyn DndActionMask) -> Self {
+        if let Some(op) = actions.cast_ref::<Self>() {
+            *op
+        } else {
+            match actions.hint() {
+                DndActions::Flags { move_, copy, link } => {
+                    let move_flag =
+                        if move_ { NSDragOperation::Move } else { NSDragOperation::empty() };
+                    let copy_flag =
+                        if copy { NSDragOperation::Copy } else { NSDragOperation::empty() };
+                    let link_flag =
+                        if link { NSDragOperation::Link } else { NSDragOperation::empty() };
+                    Self(move_flag | copy_flag | link_flag)
+                },
+                DndActions::All => Self(NSDragOperation::all()),
+            }
+        }
+    }
+
+    fn intersection(&self, other: &Self) -> Self {
+        Self(self.0.intersection(other.0))
+    }
+
+    fn intersects(&self, other: &Self) -> bool {
+        self.0.intersects(other.0)
+    }
+}
+
+impl DndActionMask for DragOperation {
+    fn hint(&self) -> DndActions {
+        if self.0.is_all() {
+            DndActions::All
+        } else {
+            DndActions::Flags {
+                move_: self.0.contains(NSDragOperation::Move),
+                copy: self.0.contains(NSDragOperation::Copy),
+                link: self.0.contains(NSDragOperation::Link),
+            }
+        }
+    }
+
+    fn intersection(&self, other: &dyn DndActionMask) -> Box<dyn DndActionMask> {
+        Box::new(self.intersection(&Self::from_dyn(other)))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn intersects(&self, other: &dyn DndActionMask) -> bool {
+        self.intersects(&Self::from_dyn(other))
     }
 }
 
@@ -282,7 +336,7 @@ impl TypedData for PasteboardValue {
                 None => {
                     return self
                         .single_file_url()
-                        .map(|str| vec![str])
+                        .map(|str| vec![str.into()])
                         .ok_or_else(|| io::ErrorKind::InvalidData.into());
                 },
             };
@@ -300,7 +354,7 @@ impl TypedData for PasteboardValue {
         Ok(items
             .into_iter()
             .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
-            .map(|ns_str| ns_str.to_string())
+            .map(|ns_str| ns_str.to_string().into())
             .collect())
     }
 
@@ -313,11 +367,11 @@ impl TypedData for PasteboardValue {
 }
 
 #[derive(Debug, Default)]
-pub struct DndState {
+pub struct Pasteboards {
     inner: RefCell<HashMap<DataTransferId, Weak<NSPasteboard>>>,
 }
 
-impl DndState {
+impl Pasteboards {
     pub fn remove_deloaded_pasteboards(&self) {
         self.inner.borrow_mut().retain(|_, v| v.load().is_some());
     }
@@ -330,15 +384,8 @@ impl DndState {
         }
     }
 
-    pub fn insert(&self, pb: &Retained<NSPasteboard>) -> DataTransferId {
-        static TRANSFER_ID: AtomicI64 = AtomicI64::new(0);
-
-        let id = TRANSFER_ID.fetch_add(1, Ordering::Relaxed);
-        let id = DataTransferId::from_raw(id);
-
-        self.inner.borrow_mut().insert(id, Weak::from_retained(pb));
-
-        id
+    pub fn insert(&self, transfer_id: DataTransferId, pb: &Retained<NSPasteboard>) {
+        self.inner.borrow_mut().insert(transfer_id, Weak::from_retained(pb));
     }
 
     pub fn get(&self, id: DataTransferId) -> Option<Pasteboard> {

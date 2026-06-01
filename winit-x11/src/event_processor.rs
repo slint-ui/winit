@@ -3,7 +3,6 @@ use std::collections::{HashMap, VecDeque};
 use std::mem::MaybeUninit;
 use std::os::raw::{c_char, c_int, c_long, c_ulong};
 use std::slice;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use dpi::{PhysicalPosition, PhysicalSize};

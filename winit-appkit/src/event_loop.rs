@@ -21,8 +21,9 @@ use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, Type
 use winit_core::error::{EventLoopError, RequestError};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents,
+    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask,
     EventLoopProxy as CoreEventLoopProxy, OwnedDisplayHandle as CoreOwnedDisplayHandle,
+    UnknownDataTransfer,
 };
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
 use winit_core::window::Theme;
@@ -33,6 +34,8 @@ use super::cursor::CustomCursor;
 use super::event::dummy_event;
 use super::monitor;
 use crate::ActivationPolicy;
+use crate::app_state::DragState;
+use crate::dnd::DragOperation;
 use crate::window::Window;
 
 #[derive(Debug)]
@@ -133,7 +136,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
         id: DataTransferId,
         type_: &dyn TransferType,
     ) -> Result<Box<dyn TypedData>, RequestError> {
-        let Some(pb) = self.app_state.dnd().get(id) else {
+        let Some(pb) = self.app_state.pasteboards().get(id) else {
             return Err(RequestError::Ignored);
         };
 
@@ -141,11 +144,30 @@ impl RootActiveEventLoop for ActiveEventLoop {
     }
 
     fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
-        let Some(pb) = self.app_state.dnd().get(id) else {
+        let Some(pb) = self.app_state.pasteboards().get(id) else {
             return Err(RequestError::Ignored);
         };
 
         Ok(Box::new(pb))
+    }
+
+    fn set_valid_actions(
+        &self,
+        id: DataTransferId,
+        actions: &dyn DndActionMask,
+    ) -> Result<(), UnknownDataTransfer> {
+        let Some(drag_state) = self.app_state.drag_state().get() else {
+            return Err(UnknownDataTransfer(id));
+        };
+
+        if drag_state.id != id {
+            return Err(UnknownDataTransfer(id));
+        }
+        let new_drag_state = DragState { id, valid_operations: DragOperation::from_dyn(actions) };
+
+        self.app_state.drag_state().set(Some(new_drag_state));
+
+        Ok(())
     }
 }
 

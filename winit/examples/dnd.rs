@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::data_transfer::{TypeHint, TypedData};
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop, DndActions};
+use winit::event_loop::{ActiveEventLoop, DndActions, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 #[path = "util/fill.rs"]
@@ -47,10 +47,6 @@ impl ApplicationHandler for Application {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(window) = self.window.as_ref() else {
-            return;
-        };
-
         match event {
             WindowEvent::DragLeft { .. } => {
                 info!("{event:?}");
@@ -91,11 +87,7 @@ impl ApplicationHandler for Application {
                     },
                 };
 
-                info!(
-                    "Types: {:#?}",
-                    data_transfer
-                        .available_types()
-                );
+                info!("Types: {:#?}", data_transfer.available_types());
 
                 let valid_type = [TypeHint::Html, TypeHint::UriList, TypeHint::Plaintext]
                     .into_iter()

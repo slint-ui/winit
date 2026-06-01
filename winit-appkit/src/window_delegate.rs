@@ -19,12 +19,12 @@ use objc2::{
 use objc2_app_kit::{
     NSAppKitVersionNumber, NSAppKitVersionNumber10_12, NSAppearance, NSAppearanceCustomization,
     NSAppearanceNameAqua, NSApplication, NSApplicationPresentationOptions, NSBackingStoreType,
-    NSColor, NSDraggingDestination, NSDraggingInfo, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
-    NSPasteboardTypePNG, NSPasteboardTypeSound, NSPasteboardTypeString, NSPasteboardTypeTIFF,
-    NSRequestUserAttentionType, NSScreen, NSToolbar, NSView, NSViewFrameDidChangeNotification,
-    NSWindow, NSWindowButton, NSWindowDelegate, NSWindowLevel, NSWindowOcclusionState,
-    NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode,
-    NSWindowTitleVisibility, NSWindowToolbarStyle,
+    NSColor, NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSPasteboardTypeFileURL,
+    NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeSound, NSPasteboardTypeString,
+    NSPasteboardTypeTIFF, NSRequestUserAttentionType, NSScreen, NSToolbar, NSView,
+    NSViewFrameDidChangeNotification, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowLevel,
+    NSWindowOcclusionState, NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask,
+    NSWindowTabbingMode, NSWindowTitleVisibility, NSWindowToolbarStyle,
 };
 use objc2_core_foundation::{CGFloat, CGPoint};
 use objc2_core_graphics::{
@@ -60,20 +60,14 @@ use super::monitor::{self, MonitorHandle, flip_window_screen_coordinates, get_di
 use super::util::cgerr;
 use super::view::WinitView;
 use super::window::{WinitPanel, WinitWindow, window_id};
+use crate::app_state::DragState;
+use crate::dnd::DragOperation;
 use crate::{OptionAsAlt, WindowAttributesMacOS, WindowExtMacOS};
-
-#[derive(Copy, Clone, Debug)]
-struct DragState {
-    id: DataTransferId,
-    accepted: bool,
-}
 
 #[derive(Debug)]
 pub(crate) struct State {
     /// Strong reference to the global application state.
     app_state: Rc<AppState>,
-
-    drag_state: Cell<Option<DragState>>,
 
     window: Retained<NSWindow>,
 
@@ -369,7 +363,7 @@ define_class!(
     unsafe impl NSDraggingDestination for WindowDelegate {
         /// Invoked when the dragged image enters destination bounds or frame
         #[unsafe(method(draggingEntered:))]
-        fn dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+        fn dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
             let _entered = debug_span!("draggingEntered:").entered();
 
             let pb = sender.draggingPasteboard();
@@ -380,15 +374,20 @@ define_class!(
 
             let vars = self.ivars();
 
-            let transfer_id = vars.app_state.dnd().insert(&pb);
-            vars.drag_state.set(Some(DragState { id: transfer_id, accepted: false }));
+            let transfer_id = DataTransferId::from_raw(sender.draggingSequenceNumber() as i64);
+            vars.app_state.pasteboards().insert(transfer_id, &pb);
+            let valid_operations = NSDragOperation::empty();
+            vars.app_state.drag_state().set(Some(DragState {
+                id: transfer_id,
+                valid_operations: DragOperation(valid_operations),
+            }));
 
             self.queue_event(WindowEvent::DragEntered {
                 id: transfer_id,
                 position: Some(position),
             });
 
-            false
+            valid_operations
         }
 
         #[unsafe(method(wantsPeriodicDraggingUpdates))]
@@ -400,18 +399,20 @@ define_class!(
         /// Invoked periodically as the image is held within the destination area, allowing
         /// modification of the dragging operation or mouse-pointer position.
         #[unsafe(method(draggingUpdated:))]
-        fn dragging_updated(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+        fn dragging_updated(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
             let _entered = debug_span!("draggingUpdated:").entered();
 
             let vars = self.ivars();
 
-            let Some(DragState { id: transfer_id, accepted }) = vars.drag_state.get() else {
-                return false.into();
+            let Some(DragState { id: transfer_id, valid_operations }) =
+                vars.app_state.drag_state().get()
+            else {
+                return NSDragOperation::empty();
             };
 
             let pb = sender.draggingPasteboard();
 
-            vars.app_state.dnd().set_pasteboard(transfer_id, &pb);
+            vars.app_state.pasteboards().set_pasteboard(transfer_id, &pb);
 
             let dl = sender.draggingLocation();
             let dl = self.view().convertPoint_fromView(dl, None);
@@ -420,7 +421,7 @@ define_class!(
 
             self.queue_event(WindowEvent::DragPosition { id: transfer_id, position });
 
-            accepted
+            valid_operations.0
         }
 
         /// Invoked when the image is released
@@ -437,13 +438,15 @@ define_class!(
 
             let vars = self.ivars();
 
-            let Some(DragState { id: transfer_id, accepted }) = vars.drag_state.get() else {
+            let Some(DragState { id: transfer_id, valid_operations }) =
+                vars.app_state.drag_state().get()
+            else {
                 return false.into();
             };
 
             let pb = sender.draggingPasteboard();
 
-            vars.app_state.dnd().set_pasteboard(transfer_id, &pb);
+            vars.app_state.pasteboards().set_pasteboard(transfer_id, &pb);
 
             let dl = sender.draggingLocation();
             let dl = self.view().convertPoint_fromView(dl, None);
@@ -453,7 +456,7 @@ define_class!(
             self.queue_event(WindowEvent::DragPosition { id: transfer_id, position });
             self.queue_event(WindowEvent::DragDropped { id: transfer_id });
 
-            accepted
+            sender.draggingSourceOperationMask().intersects(valid_operations.0)
         }
 
         /// Invoked when the dragging operation is complete
@@ -462,8 +465,8 @@ define_class!(
             let _entered = debug_span!("concludeDragOperation:").entered();
             let vars = self.ivars();
 
-            vars.app_state.dnd().remove_deloaded_pasteboards();
-            vars.drag_state.set(None);
+            vars.app_state.pasteboards().remove_deloaded_pasteboards();
+            vars.app_state.drag_state().set(None);
         }
 
         /// Invoked when the dragging operation is cancelled
@@ -472,13 +475,13 @@ define_class!(
             let _entered = debug_span!("draggingExited:").entered();
 
             let vars = self.ivars();
-            let Some(DragState { id: transfer_id, accepted: _ }) = vars.drag_state.get() else {
+            let Some(DragState { id: transfer_id, .. }) = vars.app_state.drag_state().get() else {
                 return;
             };
 
             if let Some(sender) = sender {
                 let pb = sender.draggingPasteboard();
-                vars.app_state.dnd().set_pasteboard(transfer_id, &pb);
+                vars.app_state.pasteboards().set_pasteboard(transfer_id, &pb);
 
                 let dl = sender.draggingLocation();
                 let dl = self.view().convertPoint_fromView(dl, None);
@@ -490,7 +493,7 @@ define_class!(
 
             self.queue_event(WindowEvent::DragLeft { id: transfer_id });
 
-            vars.drag_state.set(None);
+            vars.app_state.drag_state().set(None);
         }
     }
 
@@ -833,7 +836,6 @@ impl WindowDelegate {
 
         let delegate = mtm.alloc().set_ivars(State {
             app_state: Rc::clone(app_state),
-            drag_state: Default::default(),
             window: window.retain(),
             previous_position: Cell::new(flip_window_screen_coordinates(window.frame())),
             previous_scale_factor: Cell::new(scale_factor),
@@ -918,26 +920,6 @@ impl WindowDelegate {
         }
 
         Ok(delegate)
-    }
-
-    // TODO: Proper error
-    pub(super) fn set_drag_accepted(
-        &self,
-        transfer_id: DataTransferId,
-        accepted: bool,
-    ) -> Result<(), ()> {
-        let vars = self.ivars();
-        let Some(DragState { id, accepted: _ }) = vars.drag_state.get() else {
-            return Err(());
-        };
-
-        if id != transfer_id {
-            return Err(());
-        }
-
-        vars.drag_state.set(Some(DragState { id, accepted }));
-
-        Ok(())
     }
 
     #[track_caller]

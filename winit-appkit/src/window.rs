@@ -10,13 +10,12 @@ use objc2_app_kit::{NSPanel, NSResponder, NSWindow};
 use objc2_foundation::NSObject;
 use tracing::trace_span;
 use winit_core::cursor::Cursor;
-use winit_core::data_transfer::DataTransferId;
 use winit_core::error::RequestError;
 use winit_core::icon::Icon;
 use winit_core::monitor::{Fullscreen, MonitorHandle as CoreMonitorHandle};
 use winit_core::window::{
-    ImeCapabilities, ImeRequest, ImeRequestError, Theme, UnknownDataTransfer, UserAttentionType,
-    Window as CoreWindow, WindowAttributes, WindowButtons, WindowId, WindowLevel,
+    ImeCapabilities, ImeRequest, ImeRequestError, Theme, UserAttentionType, Window as CoreWindow,
+    WindowAttributes, WindowButtons, WindowId, WindowLevel,
 };
 
 use super::event_loop::ActiveEventLoop;

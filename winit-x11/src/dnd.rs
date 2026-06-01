@@ -2,10 +2,9 @@ use std::cell::Cell;
 use std::ffi::OsString;
 use std::io;
 use std::marker::PhantomData;
-use std::ops::ControlFlow;
 use std::os::raw::*;
 use std::str::Utf8Error;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::thread::ThreadId;
 

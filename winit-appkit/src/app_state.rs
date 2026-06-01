@@ -11,6 +11,7 @@ use objc2_foundation::NSNotification;
 use winit_common::core_foundation::{EventLoopProxy, MainRunLoop};
 use winit_common::event_handler::EventHandler;
 use winit_core::application::ApplicationHandler;
+use winit_core::data_transfer::DataTransferId;
 use winit_core::event::{StartCause, WindowEvent};
 use winit_core::event_loop::ControlFlow;
 use winit_core::window::WindowId;
@@ -18,12 +19,13 @@ use winit_core::window::WindowId;
 use super::event_loop::{ActiveEventLoop, notify_windows_of_exit, stop_app_immediately};
 use super::menu;
 use super::observer::EventLoopWaker;
-use crate::dnd::DndState;
+use crate::dnd::{DragOperation, Pasteboards};
 
 #[derive(Debug)]
 pub(super) struct AppState {
     mtm: MainThreadMarker,
-    dnd: DndState,
+    drag_state: Cell<Option<DragState>>,
+    pasteboards: Pasteboards,
     activation_policy: Option<NSApplicationActivationPolicy>,
     default_menu: bool,
     activate_ignoring_other_apps: bool,
@@ -49,6 +51,12 @@ pub(super) struct AppState {
     // as such should be careful to not add fields that, in turn, strongly reference those.
 }
 
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct DragState {
+    pub id: DataTransferId,
+    pub valid_operations: DragOperation,
+}
+
 // SAFETY: Creating `MainThreadBound` in a `const` context, where there is no concept of the
 // main thread.
 static GLOBAL: MainThreadBound<OnceCell<Rc<AppState>>> =
@@ -67,7 +75,8 @@ impl AppState {
 
         let this = Rc::new(Self {
             mtm,
-            dnd: Default::default(),
+            pasteboards: Default::default(),
+            drag_state: Default::default(),
             activation_policy,
             default_menu,
             activate_ignoring_other_apps,
@@ -375,8 +384,12 @@ impl AppState {
         self.waker.borrow_mut().start_at(min_timeout(wait_timeout, app_timeout));
     }
 
-    pub fn dnd(&self) -> &DndState {
-        &self.dnd
+    pub fn pasteboards(&self) -> &Pasteboards {
+        &self.pasteboards
+    }
+
+    pub fn drag_state(&self) -> &Cell<Option<DragState>> {
+        &self.drag_state
     }
 }
 
