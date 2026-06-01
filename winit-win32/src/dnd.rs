@@ -11,6 +11,7 @@ use dpi::PhysicalPosition;
 use windows_sys::Win32::Foundation::{E_ABORT, HGLOBAL, HWND, POINT, POINTL, S_OK};
 use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
 use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL};
+use windows_sys::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows_sys::Win32::System::Ole::{
     CF_HDROP, CF_UNICODETEXT, DROPEFFECT_COPY, DROPEFFECT_NONE, ReleaseStgMedium,
@@ -24,6 +25,7 @@ use crate::definitions::{
     IDataObject, IDataObjectVtbl, IDropTarget, IDropTargetVtbl, IUnknown, IUnknownVtbl,
 };
 use crate::event_loop::EventLoopRunner;
+use crate::util;
 
 #[derive(Default, Debug)]
 pub struct FileDropDataShared {
@@ -41,7 +43,6 @@ impl FileDropDataShared {
 enum DataKind {
     Uris(Vec<OsString>),
     String(String),
-    #[allow(dead_code, reason = "populated once more types are read eagerly")]
     Bytes(Vec<u8>),
 }
 
@@ -65,6 +66,12 @@ impl DataObject {
         if let Some(uris) = unsafe { read_uri_list(data_obj) } {
             if !uris.is_empty() {
                 data.insert(TypeHint::UriList, DataKind::Uris(uris));
+            }
+        }
+
+        if let Some(png) = unsafe { read_png(data_obj) } {
+            if !png.is_empty() {
+                data.insert(TypeHint::Image { extension_hint: Some("png") }, DataKind::Bytes(png));
             }
         }
 
@@ -155,6 +162,29 @@ unsafe fn read_uri_list(data_obj: *const IDataObject) -> Option<Vec<OsString>> {
     }
 
     Some(paths)
+}
+
+unsafe fn read_png(data_obj: *const IDataObject) -> Option<Vec<u8>> {
+    let format_name = util::encode_wide("PNG");
+    let format = unsafe { RegisterClipboardFormatW(format_name.as_ptr()) };
+    if format == 0 {
+        return None;
+    }
+
+    let medium = unsafe { StgMedium::get(data_obj, format as u16) }?;
+    let hglobal = medium.hglobal();
+
+    let ptr = unsafe { GlobalLock(hglobal) };
+    if ptr.is_null() {
+        return None;
+    }
+
+    let len = unsafe { GlobalSize(hglobal) };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) }.to_vec();
+
+    unsafe { GlobalUnlock(hglobal) };
+
+    Some(bytes)
 }
 
 #[derive(Debug)]
