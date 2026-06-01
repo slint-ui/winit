@@ -18,6 +18,7 @@ use wayland_client::{Connection, Proxy, QueueHandle};
 use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypeHint, TypedData};
 use winit_core::event::WindowEvent;
 use winit_core::event_loop::{DndActionMask, DndActions};
+use winit_core::window::WindowId;
 
 use crate::state::WinitState;
 
@@ -223,7 +224,14 @@ impl fmt::Display for MimeType {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct UnknownTypeHint(pub TypeHint);
+
+impl fmt::Display for UnknownTypeHint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Unknown type hint: {:?}", self.0)
+    }
+}
 
 impl TryFrom<TypeHint> for MimeType {
     type Error = UnknownTypeHint;
@@ -268,7 +276,7 @@ impl MimeData {
         let fd_clone =
             // TODO: Is it ok that this may only work once, depending on what the fd points to?
             if let Ok(cloned) = self.fd.as_ref()?.try_clone() { cloned } else { self.fd.take()? };
-        self.fd.take().map(Into::into)
+        Some(fd_clone.into())
     }
 }
 
@@ -278,12 +286,10 @@ impl TypedData for MimeData {
     }
 
     fn try_read(&mut self) -> Option<Box<dyn io::BufRead>> {
-        dbg!(&self.mime_type);
         Some(Box::new(BufReader::new(self.try_as_file()?)))
     }
 
     fn try_as_uris(&mut self) -> io::Result<Vec<OsString>> {
-        dbg!(&self.mime_type);
         let Some(file) = self.try_as_file() else {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -340,11 +346,16 @@ pub struct CurrentDrag {
     accepted_type: Option<MimeType>,
     data: WlDataOffer,
     transfer_id: DataTransferId,
+    window_id: WindowId,
 }
 
 impl CurrentDrag {
     pub(crate) fn transfer_id(&self) -> DataTransferId {
         self.transfer_id
+    }
+
+    pub(crate) fn window_id(&self) -> WindowId {
+        self.window_id
     }
 
     pub(crate) fn set_actions(&self, action_set: &DndActionSet) {
@@ -402,8 +413,8 @@ fn guess_preferred_action(action: DndAction) -> DndAction {
 }
 
 impl DndActionSet {
-    pub fn all() -> Self {
-        Self { dnd_actions: DndAction::all(), preferred_action: None }
+    pub fn empty() -> Self {
+        Self { dnd_actions: DndAction::empty(), preferred_action: None }
     }
 
     pub(crate) fn from_dyn(mask: &dyn DndActionMask) -> Self {
@@ -536,9 +547,10 @@ impl DataDeviceHandler for WinitState {
             transfer_id: DataTransferId::from_raw(drag.serial as i64),
             data: drag.inner().clone(),
             accepted_type: None,
+            window_id,
         });
 
-        current_drag.set_actions(&DndActionSet::all());
+        current_drag.set_actions(&DndActionSet::empty());
 
         self.dnd_state.current_drag = Some(current_drag);
 
@@ -563,19 +575,22 @@ impl DataDeviceHandler for WinitState {
         let Some(data) = data_device.data::<DataDeviceData>() else {
             return;
         };
-        let Some(drag) = data.drag_offer() else {
-            // Selections are not yet implemented
-            return;
-        };
 
-        let window_id = crate::make_wid(&drag.surface);
+        if let Some(current_drag) = self.dnd_state.current_drag() {
+            self.events_sink.push_window_event(
+                WindowEvent::DragLeft { id: current_drag.transfer_id() },
+                current_drag.window_id(),
+            );
 
-        self.events_sink.push_window_event(
-            WindowEvent::DragLeft { id: DataTransferId::from_raw(drag.serial.into()) },
-            window_id,
-        );
+            self.dnd_state.current_drag = None;
+        }
 
-        self.dnd_state.current_drag = None;
+        if let Some(drag) = data.drag_offer() {
+            drag.destroy();
+        }
+        if let Some(selection) = data.selection_offer() {
+            selection.destroy();
+        }
     }
 
     fn motion(
@@ -590,7 +605,7 @@ impl DataDeviceHandler for WinitState {
             return;
         };
         let Some(drag) = data.drag_offer() else {
-            // Selections are not yet implemented
+            // Selections (copy/paste) are not yet implemented
             return;
         };
 
@@ -611,8 +626,6 @@ impl DataDeviceHandler for WinitState {
             },
             window_id,
         );
-
-        self.dnd_state.current_drag = None;
     }
 
     fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {
@@ -639,12 +652,6 @@ impl DataDeviceHandler for WinitState {
             WindowEvent::DragDropped { id: DataTransferId::from_raw(drag.serial.into()) },
             window_id,
         );
-
-        self.dnd_state.current_drag().inspect(|current_drag| {
-            current_drag
-                .accept(drag.serial, current_drag.accepted_type.as_ref().map(ToString::to_string));
-            current_drag.destroy();
-        });
 
         self.dnd_state.current_drag = None;
     }
