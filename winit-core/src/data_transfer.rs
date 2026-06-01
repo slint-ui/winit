@@ -44,7 +44,7 @@
 //! using the methods defined on [`dyn AsAny`]. See each platform's documentation for details.
 
 use std::ffi::OsString;
-use std::fmt::{self, Debug};
+use std::fmt;
 use std::io;
 use std::ops::ControlFlow;
 
@@ -73,7 +73,7 @@ impl DataTransferId {
 /// The set of types supported cross-platform.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum TypeHint {
-    /// Plain UTF-8 text (see [`TypedData::try_as_plaintext`]).
+    /// Plain UTF-8 text (see [`TypedData::try_as_string`]).
     ///
     /// **Note for platform implementations**: this hint is _only_ for UTF-8 text. If the platform
     /// returns plaintext in some format other than UTF-8 by default, a [`TypedData`]
@@ -243,3 +243,84 @@ pub trait DataTransfer: AsAny + fmt::Debug {
 }
 
 impl_dyn_casting!(DataTransfer);
+
+pub enum SendData {
+    Uris(Vec<OsString>),
+    String(String),
+    Bytes(Vec<u8>),
+}
+
+pub trait NewDataTransfer: DataTransfer {
+    fn make_type(&self, type_: &dyn TransferType) -> Option<SendData>;
+}
+
+#[derive(Default)]
+pub struct NewDataTransferBuilder<T> {
+    state: T,
+    types: Vec<(Box<dyn TransferType>, Box<dyn Fn(&T) -> Option<SendData>>)>,
+}
+
+impl<T> fmt::Debug for NewDataTransferBuilder<T>
+where
+    T: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NewDataTransferBuilder").field("state", &self.state).finish_non_exhaustive()
+    }
+}
+
+impl<T> DataTransfer for NewDataTransferBuilder<T>
+where
+    T: fmt::Debug + 'static,
+{
+    fn for_each_available_type<'this>(
+        &'this self,
+        func: &'_ mut dyn FnMut(&'this dyn TransferType) -> ControlFlow<()>,
+    ) {
+        let _ = self.types.iter().try_for_each(|(ty, _)| func(&**ty));
+    }
+}
+
+impl<T> NewDataTransfer for NewDataTransferBuilder<T>
+where
+    T: fmt::Debug + 'static,
+{
+    fn make_type(&self, type_: &dyn TransferType) -> Option<SendData> {
+        let (_, func) = self.types.iter().find(|(ty, _)| ty.matches(type_))?;
+
+        func(&self.state)
+    }
+}
+
+impl<T> NewDataTransferBuilder<T> {
+    pub fn new(state: T) -> Self {
+        Self { state, types: vec![] }
+    }
+
+    pub fn add_type<Ty, F>(&mut self, type_: Ty, func: F) -> &mut Self
+    where
+        Ty: TransferType,
+        F: Fn(&T) -> Option<SendData> + 'static,
+    {
+        self.types.push((Box::new(type_), Box::new(func)));
+        self
+    }
+
+    pub fn with_type<Ty, F>(mut self, type_: Ty, func: F) -> Self
+    where
+        Ty: TransferType,
+        F: Fn(&T) -> Option<SendData> + 'static,
+    {
+        self.add_type(type_, func);
+        self
+    }
+}
+
+impl<T> NewDataTransferBuilder<T>
+where
+    T: fmt::Debug + 'static,
+{
+    pub fn build(self) -> Box<dyn NewDataTransfer> {
+        Box::new(self)
+    }
+}

@@ -13,7 +13,9 @@ use rwh_06::{DisplayHandle, HandleError, HasDisplayHandle};
 use crate::Instant;
 use crate::as_any::AsAny;
 use crate::cursor::{CustomCursor, CustomCursorSource};
-use crate::data_transfer::{DataTransfer, DataTransferId, TransferType, TypedData};
+use crate::data_transfer::{
+    DataTransfer, DataTransferId, NewDataTransfer, TransferType, TypedData,
+};
 use crate::error::{NotSupportedError, RequestError};
 use crate::monitor::MonitorHandle;
 use crate::window::{Theme, Window, WindowAttributes};
@@ -169,6 +171,17 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
     ) -> Result<(), UnknownDataTransfer> {
         let _ = actions;
         Err(UnknownDataTransfer(id))
+    }
+
+    fn start_drag(
+        &self,
+        data_transfer: Box<dyn NewDataTransfer>,
+    ) -> Result<DataTransferId, RequestError> {
+        let _ = data_transfer;
+        Err(RequestError::NotSupported(NotSupportedError::new(
+            "Cross-application data transfer (e.g. drag-and-drop, clipboard) is unsupported on \
+             this platform",
+        )))
     }
 }
 
