@@ -71,9 +71,9 @@ use winit_core::event::{
 };
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents,
+    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask,
     EventLoopProxy as RootEventLoopProxy, EventLoopProxyProvider,
-    OwnedDisplayHandle as CoreOwnedDisplayHandle,
+    OwnedDisplayHandle as CoreOwnedDisplayHandle, UnknownDataTransfer,
 };
 use winit_core::keyboard::ModifiersState;
 use winit_core::monitor::{Fullscreen, MonitorHandle as CoreMonitorHandle};
@@ -499,6 +499,19 @@ impl RootActiveEventLoop for ActiveEventLoop {
         };
 
         Ok(Box::new(WinDataTransfer::new(data)))
+    }
+
+    fn set_valid_actions(
+        &self,
+        id: DataTransferId,
+        actions: &dyn DndActionMask,
+    ) -> Result<(), UnknownDataTransfer> {
+        let mut state = self.0.drag_state.borrow_mut();
+        let Some(state) = state.as_mut().filter(|s| s.id == id) else {
+            return Err(UnknownDataTransfer(id));
+        };
+        state.actions = actions.hint();
+        Ok(())
     }
 }
 

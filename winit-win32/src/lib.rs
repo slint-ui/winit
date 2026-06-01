@@ -39,7 +39,6 @@ use self::icon::{RaiiIcon, SelectedCursor};
 pub use self::keyboard::{physicalkey_to_scancode, scancode_to_physicalkey};
 pub use self::monitor::{MonitorHandle, VideoModeHandle};
 pub use self::window::Window;
-use crate::dnd::FileDropDataShared;
 
 /// Window Handle type used by Win32 API
 pub type HWND = *mut c_void;
@@ -464,7 +463,7 @@ pub struct WindowAttributesWindows {
     pub(crate) menu: Option<HMENU>,
     pub(crate) taskbar_icon: Option<Icon>,
     pub(crate) no_redirection_bitmap: bool,
-    pub(crate) drag_and_drop: Option<Arc<FileDropDataShared>>,
+    pub(crate) drag_and_drop: bool,
     pub(crate) skip_taskbar: bool,
     pub(crate) class_name: String,
     pub(crate) decoration_shadow: bool,
@@ -484,7 +483,7 @@ impl Default for WindowAttributesWindows {
             menu: None,
             taskbar_icon: None,
             no_redirection_bitmap: false,
-            drag_and_drop: Some(Default::default()),
+            drag_and_drop: true,
             skip_taskbar: false,
             class_name: "Window Class".to_string(),
             decoration_shadow: false,
@@ -557,7 +556,7 @@ impl WindowAttributesWindows {
     /// does that, but there may be more in the future. If you need COM API with
     /// `COINIT_MULTITHREADED` you must initialize it before calling any winit functions. See <https://docs.microsoft.com/en-us/windows/win32/api/objbase/nf-objbase-coinitialize#remarks> for more information.
     pub fn with_drag_and_drop(mut self, flag: bool) -> Self {
-        self.drag_and_drop = flag.then(Default::default);
+        self.drag_and_drop = flag;
         self
     }
 

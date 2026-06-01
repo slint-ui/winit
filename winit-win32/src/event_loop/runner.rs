@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -11,7 +11,7 @@ use windows_sys::Win32::Foundation::HWND;
 use winit_core::application::ApplicationHandler;
 use winit_core::data_transfer::DataTransferId;
 use winit_core::event::{DeviceEvent, DeviceId, StartCause, SurfaceSizeWriter, WindowEvent};
-use winit_core::event_loop::ActiveEventLoop as RootActiveEventLoop;
+use winit_core::event_loop::{ActiveEventLoop as RootActiveEventLoop, DndActions};
 use winit_core::window::WindowId;
 
 use super::{ActiveEventLoop, ControlFlow, EventLoopThreadExecutor};
@@ -20,6 +20,14 @@ use crate::event_loop::{GWL_USERDATA, WindowData};
 use crate::util::get_window_long;
 
 type EventHandler = Cell<Option<&'static mut (dyn ApplicationHandler + 'static)>>;
+
+/// State for the single drag-and-drop transfer currently in flight (OLE guarantees at most one
+/// active drag per process).
+pub(super) struct DragState {
+    pub(super) id: DataTransferId,
+    data: Rc<DataObject>,
+    pub(super) actions: DndActions,
+}
 
 pub(crate) struct EventLoopRunner {
     pub(super) thread_id: u32,
@@ -39,10 +47,9 @@ pub(crate) struct EventLoopRunner {
     event_handler: Rc<EventHandler>,
     event_buffer: RefCell<VecDeque<Event>>,
 
-    /// Drag-and-drop data, cached for the lifetime of each transfer (i.e. between `DragEntered`
-    /// and `DragLeft`/`DragDropped`). Looked up by [`Self::data_transfer`] to serve the
-    /// asynchronous `ActiveEventLoop` data-transfer API.
-    data_transfers: RefCell<HashMap<DataTransferId, Rc<DataObject>>>,
+    /// The currently in-flight drag transfer, if any, alive between `DragEntered` and
+    /// `DragLeft`/`DragDropped`.
+    pub(super) drag_state: RefCell<Option<DragState>>,
 
     panic_error: Cell<Option<PanicError>>,
 }
@@ -94,20 +101,34 @@ impl EventLoopRunner {
             last_events_cleared: Cell::new(Instant::now()),
             event_handler: Rc::new(Cell::new(None)),
             event_buffer: RefCell::new(VecDeque::new()),
-            data_transfers: RefCell::new(HashMap::new()),
+            drag_state: RefCell::new(None),
         }
     }
 
     pub(crate) fn register_data_transfer(&self, id: DataTransferId, data: Rc<DataObject>) {
-        self.data_transfers.borrow_mut().insert(id, data);
+        *self.drag_state.borrow_mut() =
+            Some(DragState { id, data, actions: DndActions::none() });
     }
 
     pub(crate) fn remove_data_transfer(&self, id: DataTransferId) {
-        self.data_transfers.borrow_mut().remove(&id);
+        let mut state = self.drag_state.borrow_mut();
+        if state.as_ref().is_some_and(|s| s.id == id) {
+            *state = None;
+        }
     }
 
     pub(crate) fn data_transfer(&self, id: DataTransferId) -> Option<Rc<DataObject>> {
-        self.data_transfers.borrow().get(&id).cloned()
+        let state = self.drag_state.borrow();
+        state.as_ref().filter(|s| s.id == id).map(|s| s.data.clone())
+    }
+
+    pub(crate) fn current_drag_actions(&self, id: DataTransferId) -> DndActions {
+        self.drag_state
+            .borrow()
+            .as_ref()
+            .filter(|s| s.id == id)
+            .map(|s| s.actions)
+            .unwrap_or(DndActions::none())
     }
 
     /// Associate the application's event handler with the runner.
@@ -158,14 +179,14 @@ impl EventLoopRunner {
             last_events_cleared: _,
             event_handler,
             event_buffer: _,
-            data_transfers,
+            drag_state,
         } = self;
         interrupt_msg_dispatch.set(false);
         runner_state.set(RunnerState::Uninitialized);
         panic_error.set(None);
         exit.set(None);
         event_handler.set(None);
-        data_transfers.borrow_mut().clear();
+        *drag_state.borrow_mut() = None;
     }
 }
 

@@ -1157,8 +1157,6 @@ impl CoreWindow for Window {
     fn rwh_06_display_handle(&self) -> &dyn rwh_06::HasDisplayHandle {
         self
     }
-
-    // TODO: `set_valid_actions`
 }
 
 pub(super) struct InitData<'a> {
@@ -1216,7 +1214,7 @@ impl InitData<'_> {
     }
 
     unsafe fn create_window_data(&self, win: &Window) -> event_loop::WindowData {
-        let file_drop_handler = if let Some(shared) = self.win_attributes.drag_and_drop.clone() {
+        let file_drop_handler = if self.win_attributes.drag_and_drop {
             let ole_init_result = unsafe { OleInitialize(ptr::null_mut()) };
             // It is ok if the initialize result is `S_FALSE` because it might happen that
             // multiple windows are created on the same thread.
@@ -1235,7 +1233,6 @@ impl InitData<'_> {
             let mut file_drop_handler = FileDropHandler::new(
                 win.window.hwnd(),
                 self.runner.clone(),
-                shared,
                 Box::new(move |event| {
                     file_drop_runner.send_event(Event::Window { window_id, event })
                 }),

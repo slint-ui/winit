@@ -4,8 +4,7 @@ use std::io;
 use std::ops::ControlFlow;
 use std::os::windows::ffi::OsStringExt;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
 use dpi::PhysicalPosition;
 use windows_sys::Win32::Foundation::{E_ABORT, HGLOBAL, HWND, POINT, POINTL, S_OK};
@@ -14,11 +13,13 @@ use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TY
 use windows_sys::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows_sys::Win32::System::Ole::{
-    CF_HDROP, CF_UNICODETEXT, DROPEFFECT_COPY, DROPEFFECT_NONE, ReleaseStgMedium,
+    CF_HDROP, CF_UNICODETEXT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
+    ReleaseStgMedium,
 };
 use windows_sys::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows_sys::core::{GUID, HRESULT};
 use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypeHint, TypedData};
+use winit_core::event_loop::DndActions;
 use winit_core::event::WindowEvent;
 
 use crate::definitions::{
@@ -26,18 +27,6 @@ use crate::definitions::{
 };
 use crate::event_loop::EventLoopRunner;
 use crate::util;
-
-#[derive(Default, Debug)]
-pub struct FileDropDataShared {
-    transfer_id: AtomicI64,
-    pub accepted: AtomicBool,
-}
-
-impl FileDropDataShared {
-    pub fn transfer_id(&self) -> DataTransferId {
-        DataTransferId::from_raw(self.transfer_id.load(Ordering::Relaxed))
-    }
-}
 
 #[derive(Debug)]
 enum DataKind {
@@ -261,19 +250,7 @@ pub struct FileDropHandlerData {
     window: HWND,
     runner: Rc<EventLoopRunner>,
     send_event: Box<dyn Fn(WindowEvent)>,
-    shared: Arc<FileDropDataShared>,
     active_data_transfer_id: Option<DataTransferId>,
-}
-
-impl FileDropHandlerData {
-    fn cursor_effect(&self) -> u32 {
-        if self.shared.accepted.load(Ordering::Relaxed) {
-            // TODO: Handle other kinds of drop effect
-            DROPEFFECT_COPY
-        } else {
-            DROPEFFECT_NONE
-        }
-    }
 }
 
 pub struct FileDropHandler {
@@ -285,7 +262,6 @@ impl FileDropHandler {
     pub(crate) fn new(
         window: HWND,
         runner: Rc<EventLoopRunner>,
-        shared: Arc<FileDropDataShared>,
         send_event: Box<dyn Fn(WindowEvent)>,
     ) -> FileDropHandler {
         let data = Box::new(FileDropHandlerData {
@@ -295,7 +271,6 @@ impl FileDropHandler {
             runner,
             send_event,
             active_data_transfer_id: None,
-            shared,
         });
         FileDropHandler { data: Box::into_raw(data) }
     }
@@ -350,11 +325,6 @@ impl FileDropHandler {
             DataTransferId::from_raw(DATA_TRANSFER_ID.fetch_add(1, Ordering::Relaxed));
         drop_handler.active_data_transfer_id = Some(data_transfer_id);
 
-        // Make the new transfer visible to `accept_drag`/`reject_drag` and reset acceptance for
-        // this drag.
-        drop_handler.shared.transfer_id.store(data_transfer_id.into_raw(), Ordering::Relaxed);
-        drop_handler.shared.accepted.store(false, Ordering::Relaxed);
-
         let data = Rc::new(unsafe { DataObject::from_idataobject(pDataObj) });
         drop_handler.runner.register_data_transfer(data_transfer_id, data);
 
@@ -376,7 +346,7 @@ impl FileDropHandler {
 
     unsafe extern "system" fn DragOver(
         this: *mut IDropTarget,
-        _grfKeyState: u32,
+        grfKeyState: u32,
         pt: POINTL,
         pdwEffect: *mut u32,
     ) -> HRESULT {
@@ -389,6 +359,9 @@ impl FileDropHandler {
             return E_ABORT;
         };
 
+        let actions = drop_handler.runner.current_drag_actions(data_transfer_id);
+        let source_allowed = unsafe { *pdwEffect };
+
         let mut pt = POINT { x: pt.x, y: pt.y };
         unsafe {
             ScreenToClient(drop_handler.window, &mut pt);
@@ -396,7 +369,7 @@ impl FileDropHandler {
         let position = PhysicalPosition::new(pt.x as f64, pt.y as f64);
         (drop_handler.send_event)(WindowEvent::DragPosition { id: data_transfer_id, position });
         unsafe {
-            *pdwEffect = drop_handler.cursor_effect();
+            *pdwEffect = pick_effect(actions, grfKeyState, source_allowed);
         }
 
         S_OK
@@ -417,7 +390,7 @@ impl FileDropHandler {
     unsafe extern "system" fn Drop(
         this: *mut IDropTarget,
         _pDataObj: *const IDataObject,
-        _grfKeyState: u32,
+        grfKeyState: u32,
         pt: POINTL,
         pdwEffect: *mut u32,
     ) -> HRESULT {
@@ -430,6 +403,9 @@ impl FileDropHandler {
             return E_ABORT;
         };
 
+        let actions = drop_handler.runner.current_drag_actions(data_transfer_id);
+        let source_allowed = unsafe { *pdwEffect };
+
         let mut pt = POINT { x: pt.x, y: pt.y };
         unsafe {
             ScreenToClient(drop_handler.window, &mut pt);
@@ -439,7 +415,7 @@ impl FileDropHandler {
         (drop_handler.send_event)(WindowEvent::DragPosition { id: data_transfer_id, position });
         (drop_handler.send_event)(WindowEvent::DragDropped { id: data_transfer_id });
         unsafe {
-            *pdwEffect = drop_handler.cursor_effect();
+            *pdwEffect = pick_effect(actions, grfKeyState, source_allowed);
         }
 
         // The application has had a chance to read the data while handling `DragDropped`; the
@@ -473,3 +449,43 @@ static DROP_TARGET_VTBL: IDropTargetVtbl = IDropTargetVtbl {
     DragLeave: FileDropHandler::DragLeave,
     Drop: FileDropHandler::Drop,
 };
+
+// Intersect the app's valid actions with the source's allowed effects, honoring Ctrl/Shift.
+fn pick_effect(actions: DndActions, key_state: u32, source_allowed: u32) -> u32 {
+    const MK_SHIFT: u32 = 0x0004;
+    const MK_CONTROL: u32 = 0x0008;
+
+    let mut allowed = 0u32;
+    if actions.copy() && (source_allowed & DROPEFFECT_COPY) != 0 {
+        allowed |= DROPEFFECT_COPY;
+    }
+    if actions.move_() && (source_allowed & DROPEFFECT_MOVE) != 0 {
+        allowed |= DROPEFFECT_MOVE;
+    }
+    if actions.link() && (source_allowed & DROPEFFECT_LINK) != 0 {
+        allowed |= DROPEFFECT_LINK;
+    }
+    if allowed == 0 {
+        return DROPEFFECT_NONE;
+    }
+
+    let ctrl = key_state & MK_CONTROL != 0;
+    let shift = key_state & MK_SHIFT != 0;
+    if ctrl && shift && (allowed & DROPEFFECT_LINK) != 0 {
+        return DROPEFFECT_LINK;
+    }
+    if ctrl && !shift && (allowed & DROPEFFECT_COPY) != 0 {
+        return DROPEFFECT_COPY;
+    }
+    if !ctrl && shift && (allowed & DROPEFFECT_MOVE) != 0 {
+        return DROPEFFECT_MOVE;
+    }
+
+    if (allowed & DROPEFFECT_COPY) != 0 {
+        DROPEFFECT_COPY
+    } else if (allowed & DROPEFFECT_MOVE) != 0 {
+        DROPEFFECT_MOVE
+    } else {
+        DROPEFFECT_LINK
+    }
+}
