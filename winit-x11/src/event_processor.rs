@@ -457,8 +457,7 @@ impl EventProcessor {
                     Default::default()
                 };
 
-                dnd.init_state(version, source_window, window, types.into());
-                dnd.transfer_id()
+                dnd.init_state(version, source_window, window, types.into()).transfer_id
             };
 
             app.window_event(&self.target, window_id, WindowEvent::DragEntered {
@@ -496,11 +495,11 @@ impl EventProcessor {
             // never contending the lock.
             let transfer_id = {
                 let dnd = self.target.dnd.borrow();
+                let Some(state) = &dnd.state else {
+                    return;
+                };
                 // By our own state flow, `state` should never be `None` at this point.
-                let version = dnd.state.as_ref().map(|s| s.version).unwrap_or_else(|| {
-                    warn!("Received `XdndPosition` without `XdndEnter`");
-                    5
-                });
+                let version = state.version;
 
                 let time = if version == 0 {
                     // In version 0, time isn't specified
@@ -516,16 +515,12 @@ impl EventProcessor {
                     dnd.send_status(
                         window,
                         source_window,
-                        if dnd.shared.accepted.load(Ordering::Relaxed) {
-                            DndState::Accepted
-                        } else {
-                            DndState::Rejected
-                        },
+                        if state.accepted { DndState::Accepted } else { DndState::Rejected },
                     )
                     .expect("Failed to send `XdndStatus` message.");
                 }
 
-                dnd.transfer_id()
+                state.transfer_id
             };
 
             app.window_event(&self.target, window_id, WindowEvent::DragPosition {
@@ -539,12 +534,15 @@ impl EventProcessor {
         if xev.message_type == atoms[XdndDrop] as c_ulong {
             let (source_window, transfer_id) = {
                 let dnd = self.target.dnd.borrow();
+                let Some(state) = &dnd.state else {
+                    return;
+                };
                 let Some(source_window) = dnd.state.as_ref().map(|s| s.source_window) else {
                     warn!("Received `XdndDrop` without `XdndEnter`");
                     return;
                 };
 
-                (source_window, dnd.transfer_id())
+                (source_window, state.transfer_id)
             };
 
             app.window_event(&self.target, window_id, WindowEvent::DragDropped { id: transfer_id });
@@ -562,8 +560,13 @@ impl EventProcessor {
         }
 
         if xev.message_type == atoms[XdndLeave] as c_ulong {
-            let transfer_id = self.target.dnd.borrow().transfer_id();
-            app.window_event(&self.target, window_id, WindowEvent::DragLeft { id: transfer_id });
+            let dnd = self.target.dnd.borrow();
+            let Some(state) = &dnd.state else {
+                return;
+            };
+            app.window_event(&self.target, window_id, WindowEvent::DragLeft {
+                id: state.transfer_id,
+            });
         }
     }
 

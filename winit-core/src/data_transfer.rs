@@ -144,17 +144,19 @@ pub trait TransferType: AsAny + fmt::Debug {
     /// If this returns `None`, then this is a platform-dependent type that has no cross-platform
     /// equivalent.
     fn hint(&self) -> Option<TypeHint>;
+
+    /// Check whether two dynamically-typed transfer types are equivalent.
+    // Can't use a `PartialEq` bound because it causes a dependency cycle.
+    fn matches(&self, other: &dyn TransferType) -> bool;
 }
 
 impl TransferType for TypeHint {
     fn hint(&self) -> Option<TypeHint> {
         Some(*self)
     }
-}
 
-impl TransferType for Option<TypeHint> {
-    fn hint(&self) -> Option<TypeHint> {
-        *self
+    fn matches(&self, other: &dyn TransferType) -> bool {
+        other.hint() == Some(*self)
     }
 }
 
@@ -226,19 +228,17 @@ pub trait DataTransfer: AsAny + fmt::Debug {
     /// platform-specific type is required then that platform's implementation of `TransferType` can
     /// be used.
     fn has_type(&self, type_: &dyn TransferType) -> bool {
-        type_.hint().is_some_and(|hint| {
-            let mut found = false;
-            self.for_each_available_type(&mut |haystack| {
-                if haystack.hint() == Some(hint) {
-                    found = true;
-                    ControlFlow::Break(())
-                } else {
-                    ControlFlow::Continue(())
-                }
-            });
+        let mut found = false;
+        self.for_each_available_type(&mut |haystack| {
+            if haystack.matches(type_) {
+                found = true;
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
 
-            found
-        })
+        found
     }
 }
 

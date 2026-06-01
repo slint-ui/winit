@@ -35,6 +35,7 @@ use winit_core::window::{
     CursorGrabMode, ImeCapabilities, ImeRequest, ImeRequestError, ResizeDirection, Theme, WindowId,
 };
 
+use crate::dnd::DndState;
 use crate::event_loop::OwnedDisplayHandle;
 use crate::logical_to_physical_rounded;
 use crate::seat::{

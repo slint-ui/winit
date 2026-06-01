@@ -18,6 +18,19 @@ use crate::error::{NotSupportedError, RequestError};
 use crate::monitor::MonitorHandle;
 use crate::window::{Theme, Window, WindowAttributes};
 
+/// An operation was attempted on a data transfer ID, but that ID was invalid.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct UnknownDataTransfer(pub DataTransferId);
+
+impl fmt::Display for UnknownDataTransfer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = self.0.into_raw();
+        write!(f, "Unknown data transfer with ID {id}")
+    }
+}
+
+impl std::error::Error for UnknownDataTransfer {}
+
 pub trait ActiveEventLoop: AsAny + fmt::Debug {
     /// Creates an [`EventLoopProxy`] that can be used to dispatch user events
     /// to the main event loop, possibly from another thread.
@@ -143,6 +156,20 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
              this platform",
         )))
     }
+
+    /// Set a given `DndActionMask` as the valid actions for the given [`DataTransferId`],
+    /// presuming that the transfer ID is from a drag-and-drop operation.
+    ///
+    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data
+    /// can be dropped.
+    fn set_valid_actions(
+        &self,
+        id: DataTransferId,
+        actions: &dyn DndActionMask,
+    ) -> Result<(), UnknownDataTransfer> {
+        let _ = actions;
+        Err(UnknownDataTransfer(id))
+    }
 }
 
 impl HasDisplayHandle for dyn ActiveEventLoop + '_ {
@@ -152,6 +179,105 @@ impl HasDisplayHandle for dyn ActiveEventLoop + '_ {
 }
 
 impl_dyn_casting!(ActiveEventLoop);
+
+// Inspired by https://developer.mozilla.org/en-US/docs/Web/API/DataTransfer/dropEffect
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum DndActions {
+    /// A specific set of operations.
+    Flags { move_: bool, copy: bool, link: bool },
+    /// All actions, including platform-specific ones not represented in `Self::Flags`.
+    All,
+}
+
+impl DndActions {
+    pub const fn copy(&self) -> bool {
+        match *self {
+            DndActions::Flags { copy, .. } => copy,
+            DndActions::All => true,
+        }
+    }
+
+    pub const fn move_(&self) -> bool {
+        match *self {
+            DndActions::Flags { move_, .. } => move_,
+            DndActions::All => true,
+        }
+    }
+
+    pub const fn link(&self) -> bool {
+        match *self {
+            DndActions::Flags { link, .. } => link,
+            DndActions::All => true,
+        }
+    }
+
+    pub const fn all() -> Self {
+        Self::All
+    }
+
+    pub const fn none() -> Self {
+        Self::Flags { move_: false, copy: false, link: false }
+    }
+
+    pub const fn any(&self) -> bool {
+        match *self {
+            Self::All => true,
+            Self::Flags { move_, copy, link } => move_ || copy || link,
+        }
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        !self.any()
+    }
+
+    pub const fn intersects(&self, other: &Self) -> bool {
+        self.intersection(other).any()
+    }
+
+    pub const fn intersection(&self, other: &Self) -> Self {
+        match (*self, *other) {
+            (Self::All, other) | (other, Self::All) => other,
+            (
+                Self::Flags { move_: this_move, copy: this_copy, link: this_link },
+                Self::Flags { move_: other_move, copy: other_copy, link: other_link },
+            ) => Self::Flags {
+                move_: this_move && other_move,
+                copy: this_copy && other_copy,
+                link: this_link && other_link,
+            },
+        }
+    }
+}
+
+pub trait DndActionMask: AsAny + fmt::Debug {
+    fn hint(&self) -> DndActions;
+    fn intersection(&self, other: &dyn DndActionMask) -> Box<dyn DndActionMask>;
+    fn is_empty(&self) -> bool;
+
+    fn intersects(&self, other: &dyn DndActionMask) -> bool {
+        !self.intersection(other).is_empty()
+    }
+}
+
+impl_dyn_casting!(DndActionMask);
+
+impl DndActionMask for DndActions {
+    fn hint(&self) -> DndActions {
+        *self
+    }
+
+    fn intersects(&self, other: &dyn DndActionMask) -> bool {
+        self.intersects(&other.hint())
+    }
+
+    fn intersection(&self, other: &dyn DndActionMask) -> Box<dyn DndActionMask> {
+        Box::new(self.intersection(&other.hint()))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+}
 
 /// Control the [`ActiveEventLoop`], possibly from a different thread, without referencing it
 /// directly.

@@ -24,9 +24,9 @@ use winit_core::error::{EventLoopError, NotSupportedError, RequestError};
 use winit_core::event::{DeviceId, StartCause, WindowEvent};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents,
+    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask,
     EventLoopProxy as CoreEventLoopProxy, EventLoopProxyProvider,
-    OwnedDisplayHandle as CoreOwnedDisplayHandle,
+    OwnedDisplayHandle as CoreOwnedDisplayHandle, UnknownDataTransfer,
 };
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
 use winit_core::window::{Theme, Window as CoreWindow, WindowAttributes, WindowId};
@@ -769,7 +769,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
     fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
         let dnd = self.dnd.borrow();
 
-        if dnd.transfer_id() != id {
+        if !dnd.state.as_ref().is_some_and(|state| state.transfer_id == id) {
             return Err(RequestError::Ignored);
         }
 
@@ -787,7 +787,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
     ) -> Result<Box<dyn TypedData>, RequestError> {
         let mut dnd = self.dnd.borrow_mut();
 
-        if dnd.transfer_id() != id {
+        if !dnd.state.as_ref().is_some_and(|state| state.transfer_id == id) {
             return Err(RequestError::NotSupported(NotSupportedError::new(
                 "Unknown data transfer",
             )));
@@ -831,6 +831,26 @@ impl RootActiveEventLoop for ActiveEventLoop {
         state.last_fetched_selection = new_state;
 
         Ok(Box::new(reader))
+    }
+
+    fn set_valid_actions(
+        &self,
+        id: DataTransferId,
+        actions: &dyn DndActionMask,
+    ) -> Result<(), UnknownDataTransfer> {
+        let mut dnd = self.dnd.borrow_mut();
+
+        let Some(state) = &mut dnd.state else {
+            return Err(UnknownDataTransfer(id));
+        };
+
+        if state.transfer_id != id {
+            return Err(UnknownDataTransfer(id));
+        }
+
+        state.accepted = actions.hint().any();
+
+        Ok(())
     }
 }
 

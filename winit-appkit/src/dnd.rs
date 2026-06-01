@@ -79,6 +79,15 @@ impl TransferType for PasteboardType {
     fn hint(&self) -> Option<winit_core::data_transfer::TypeHint> {
         self.hint
     }
+
+    fn matches(&self, other: &dyn TransferType) -> bool {
+        if let Some(other_mime) = other.cast_ref::<Self>() {
+            *self == *other_mime
+        } else {
+            // If either hint is `None`, return false
+            self.hint().is_some_and(|hint| other.hint() == Some(hint))
+        }
+    }
 }
 
 /// A thin wrapper around [`NSPasteboard`], implementing [`DataTransfer`].
@@ -143,25 +152,7 @@ impl DataTransfer for Pasteboard {
         &'this self,
         func: &'_ mut dyn FnMut(&'this dyn TransferType) -> std::ops::ControlFlow<()>,
     ) {
-        for ty in self.types() {
-            if let ControlFlow::Break(()) = func(ty) {
-                break;
-            }
-        }
-    }
-
-    fn has_type(&self, type_: &dyn TransferType) -> bool {
-        if let Some(needle) = type_.cast_ref::<PasteboardType>().cloned() {
-            let Some(pb_types) = self.inner.types() else {
-                return false;
-            };
-
-            pb_types.iter().any(|haystack| **needle == *haystack)
-        } else if let Some(needle) = type_.hint() {
-            self.types().iter().any(|haystack| haystack.hint() == Some(needle))
-        } else {
-            false
-        }
+        let _ = self.types().iter().map(|mime| mime as &dyn TransferType).try_for_each(func);
     }
 }
 

@@ -263,23 +263,15 @@ impl TypedData for SelectionReader {
             Some(TypeHint::Plaintext) | Some(TypeHint::Html) => {
                 let data = self.data.try_data()?;
 
-                // Bad way to detect UTF-16 - some applications (confirmed to at least happen with
-                // Firefox) don't emit a BOM when passing HTML, so we need to check:
-                // A) Does the string contain a null
-                // B) Can the string be decoded as UTF-8
-                if data.contains(&0) {
-                    decode_utf16_bytes(data)
-                        // Even if we guess that it's utf-16, we'll still try utf-8 just in case
-                        .or_else(|_| {
-                            std::str::from_utf8(data)
-                                .map(|str| str.to_owned())
-                                .map_err(invalid_data)
-                        })
-                } else {
-                    std::str::from_utf8(data)
+                // TODO: Is it correct to default to UTF-8?
+                let charset = self.type_.charset.unwrap_or(Charset::Utf8);
+
+                match charset {
+                    Charset::Utf16 => decode_utf16_bytes(data),
+                    Charset::Utf8 => std::str::from_utf8(data)
                         .map(|str| str.to_owned())
                         .map_err(invalid_data)
-                        .or_else(|_| decode_utf16_bytes(data))
+                        .or_else(|_| decode_utf16_bytes(data)),
                 }
             },
             Some(TypeHint::UriList) => {
@@ -326,30 +318,11 @@ impl SelectionFetchState {
     }
 }
 
-#[derive(Default, Debug)]
-pub struct DndSharedState {
-    transfer_id: AtomicI64,
-    /// Whether the drag operation is accepted (or `None` if the user never indicated that it's
-    /// accepted or rejected)
-    // Populated by `Window::accept_drag`/`Window::reject_drag`.
-    pub accepted: AtomicBool,
-}
-
-impl DndSharedState {
-    fn reset(&self) {
-        self.transfer_id.fetch_add(1, Ordering::Relaxed);
-        self.accepted.store(false, Ordering::Relaxed);
-    }
-
-    pub fn transfer_id(&self) -> DataTransferId {
-        DataTransferId::from_raw(self.transfer_id.load(Ordering::Relaxed))
-    }
-}
-
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct DragState {
     // Populated by XdndEnter event handler
     pub version: c_long,
+    pub transfer_id: DataTransferId,
     pub types: Arc<[SelectionType]>,
     // Populated by Xdnd* event handlers
     pub source_window: xproto::Window,
@@ -357,12 +330,31 @@ pub struct DragState {
     pub target_window: xproto::Window,
     // Populated by `fetch_data_transfer`
     pub last_fetched_selection: Option<SelectionFetchState>,
+    /// Whether the drag operation is accepted (or `None` if the user never indicated that it's
+    /// accepted or rejected)
+    // Populated by `Window::accept_drag`/`Window::reject_drag`.
+    pub accepted: bool,
+}
+
+impl Default for DragState {
+    fn default() -> Self {
+        static DATA_TRANSFER_ID: AtomicI64 = AtomicI64::new(0);
+
+        Self {
+            version: Default::default(),
+            transfer_id: DataTransferId::from_raw(DATA_TRANSFER_ID.fetch_add(1, Ordering::Relaxed)),
+            types: Default::default(),
+            source_window: Default::default(),
+            target_window: Default::default(),
+            last_fetched_selection: Default::default(),
+            accepted: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct Dnd {
     xconn: Arc<XConnection>,
-    pub shared: Arc<DndSharedState>,
     pub deadlock_sentinel: DeadlockSentinel,
     // If `None`, no drag operation is in progress.
     pub state: Option<DragState>,
@@ -378,57 +370,66 @@ impl Selection {
         Selection { types }
     }
 }
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
+enum Charset {
+    Utf8,
+    Utf16,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SelectionType {
     hint: Option<TypeHint>,
     atom: xproto::Atom,
+    charset: Option<Charset>,
 }
 
 impl SelectionType {
     pub(crate) fn new(atoms: &Atoms, atom: xproto::Atom) -> Self {
         let atom_to_hint = [
             // Files
-            (atoms[TextUriList], TypeHint::UriList),
-            (atoms[TARGETS], TypeHint::UriList),
-            (atoms[SAVE_TARGETS], TypeHint::UriList),
+            (atoms[TextUriList], TypeHint::UriList, None),
+            (atoms[TARGETS], TypeHint::UriList, None),
+            (atoms[SAVE_TARGETS], TypeHint::UriList, None),
             // Plaintext
-            (atoms[STRING], TypeHint::Plaintext),
-            (atoms[UTF8_STRING], TypeHint::Plaintext),
-            (atoms[TextPlain], TypeHint::Plaintext),
-            (atoms[TextPlainCharsetUtf8], TypeHint::Plaintext),
+            (atoms[STRING], TypeHint::Plaintext, None),
+            (atoms[UTF8_STRING], TypeHint::Plaintext, None),
+            (atoms[TextPlain], TypeHint::Plaintext, Some(Charset::Utf16)),
+            (atoms[TextPlainCharsetUtf8], TypeHint::Plaintext, Some(Charset::Utf8)),
             // HTML
-            (atoms[TextHtml], TypeHint::Html),
-            (atoms[TextHtmlCharsetUtf8], TypeHint::Html),
+            (atoms[TextHtml], TypeHint::Html, Some(Charset::Utf16)),
+            (atoms[TextHtmlCharsetUtf8], TypeHint::Html, Some(Charset::Utf8)),
             // RTF
-            (atoms[ApplicationRtf], TypeHint::Rtf),
+            (atoms[ApplicationRtf], TypeHint::Rtf, None),
             // Audio
-            (atoms[AudioAac], TypeHint::Audio { extension_hint: Some("aac") }),
-            (atoms[AudioAiff], TypeHint::Audio { extension_hint: Some("aif") }),
-            (atoms[AudioFlac], TypeHint::Audio { extension_hint: Some("flac") }),
-            (atoms[AudioVndWav], TypeHint::Audio { extension_hint: Some("wav") }),
-            (atoms[AudioVndWave], TypeHint::Audio { extension_hint: Some("wav") }),
-            (atoms[AudioWav], TypeHint::Audio { extension_hint: Some("wav") }),
-            (atoms[AudioWave], TypeHint::Audio { extension_hint: Some("wav") }),
-            (atoms[AudioXWav], TypeHint::Audio { extension_hint: Some("wav") }),
-            (atoms[AudioOgg], TypeHint::Audio { extension_hint: Some("ogg") }),
-            (atoms[AudioMpeg], TypeHint::Audio { extension_hint: Some("mp3") }),
+            (atoms[AudioAac], TypeHint::Audio { extension_hint: Some("aac") }, None),
+            (atoms[AudioAiff], TypeHint::Audio { extension_hint: Some("aif") }, None),
+            (atoms[AudioFlac], TypeHint::Audio { extension_hint: Some("flac") }, None),
+            (atoms[AudioVndWav], TypeHint::Audio { extension_hint: Some("wav") }, None),
+            (atoms[AudioVndWave], TypeHint::Audio { extension_hint: Some("wav") }, None),
+            (atoms[AudioWav], TypeHint::Audio { extension_hint: Some("wav") }, None),
+            (atoms[AudioWave], TypeHint::Audio { extension_hint: Some("wav") }, None),
+            (atoms[AudioXWav], TypeHint::Audio { extension_hint: Some("wav") }, None),
+            (atoms[AudioOgg], TypeHint::Audio { extension_hint: Some("ogg") }, None),
+            (atoms[AudioMpeg], TypeHint::Audio { extension_hint: Some("mp3") }, None),
             // Image
-            (atoms[ImageBmp], TypeHint::Image { extension_hint: Some("bmp") }),
-            (atoms[ImageGif], TypeHint::Image { extension_hint: Some("gif") }),
-            (atoms[ImageJpeg], TypeHint::Image { extension_hint: Some("jpg") }),
-            (atoms[ImagePjpeg], TypeHint::Image { extension_hint: Some("jpg") }),
-            (atoms[ImagePng], TypeHint::Image { extension_hint: Some("png") }),
-            (atoms[ImageRaw], TypeHint::Image { extension_hint: Some("raw") }),
-            (atoms[ImageSvg], TypeHint::Image { extension_hint: Some("svg") }),
-            (atoms[ImageTiff], TypeHint::Image { extension_hint: Some("tiff") }),
-            (atoms[ImageWebp], TypeHint::Image { extension_hint: Some("webp") }),
-            (atoms[ImageXIcon], TypeHint::Image { extension_hint: Some("ico") }),
+            (atoms[ImageBmp], TypeHint::Image { extension_hint: Some("bmp") }, None),
+            (atoms[ImageGif], TypeHint::Image { extension_hint: Some("gif") }, None),
+            (atoms[ImageJpeg], TypeHint::Image { extension_hint: Some("jpg") }, None),
+            (atoms[ImagePjpeg], TypeHint::Image { extension_hint: Some("jpg") }, None),
+            (atoms[ImagePng], TypeHint::Image { extension_hint: Some("png") }, None),
+            (atoms[ImageRaw], TypeHint::Image { extension_hint: Some("raw") }, None),
+            (atoms[ImageSvg], TypeHint::Image { extension_hint: Some("svg") }, None),
+            (atoms[ImageTiff], TypeHint::Image { extension_hint: Some("tiff") }, None),
+            (atoms[ImageWebp], TypeHint::Image { extension_hint: Some("webp") }, None),
+            (atoms[ImageXIcon], TypeHint::Image { extension_hint: Some("ico") }, None),
         ];
-        let hint =
-            atom_to_hint.iter().find_map(|(haystack, hint)| (*haystack == atom).then_some(*hint));
+        let hint_and_charset = atom_to_hint.iter().find_map(|(haystack, hint, charset)| {
+            (*haystack == atom).then_some((Some(*hint), *charset))
+        });
 
-        Self { hint, atom }
+        let (hint, charset) = hint_and_charset.unwrap_or((None, None));
+
+        Self { hint, charset, atom }
     }
 
     pub fn atom(&self) -> xproto::Atom {
@@ -440,6 +441,15 @@ impl TransferType for SelectionType {
     fn hint(&self) -> Option<TypeHint> {
         self.hint
     }
+
+    fn matches(&self, other: &dyn TransferType) -> bool {
+        if let Some(other_mime) = other.cast_ref::<Self>() {
+            *self == *other_mime
+        } else {
+            // If either hint is `None`, return false
+            self.hint().is_some_and(|hint| other.hint() == Some(hint))
+        }
+    }
 }
 
 impl DataTransfer for Selection {
@@ -447,43 +457,20 @@ impl DataTransfer for Selection {
         &'this self,
         func: &'_ mut dyn FnMut(&'this dyn TransferType) -> std::ops::ControlFlow<()>,
     ) {
-        for ty in &self.types[..] {
-            if let ControlFlow::Break(()) = func(ty) {
-                break;
-            }
-        }
-    }
-
-    fn has_type(&self, type_: &dyn TransferType) -> bool {
-        if let Some(x11_type) = type_.cast_ref() {
-            self.types.iter().any(|haystack| haystack == x11_type)
-        } else {
-            let Some(hint) = type_.hint() else {
-                return false;
-            };
-
-            self.types.iter().any(|haystack| haystack.hint().is_some_and(|hs| hs.matches(&hint)))
-        }
+        let _ = self.types.iter().map(|mime| mime as &dyn TransferType).try_for_each(func);
     }
 }
 
 impl Dnd {
     pub fn new(xconn: Arc<XConnection>, deadlock_sentinel: DeadlockSentinel) -> Self {
-        let shared = Arc::new(Default::default());
-
-        Dnd { xconn, shared, state: None, deadlock_sentinel }
+        Dnd { xconn, state: None, deadlock_sentinel }
     }
 
     pub fn find_type_by_hint(&self, hint: TypeHint) -> Option<&SelectionType> {
         self.state.as_ref()?.types.iter().find(|haystack| haystack.hint() == Some(hint))
     }
 
-    pub fn transfer_id(&self) -> DataTransferId {
-        DataTransferId::from_raw(self.shared.transfer_id.load(Ordering::Relaxed))
-    }
-
     pub fn reset(&mut self) {
-        self.shared.reset();
         self.state = None;
     }
 
@@ -499,7 +486,7 @@ impl Dnd {
             types,
             source_window,
             target_window,
-            last_fetched_selection: None,
+            ..Default::default()
         })
     }
 
@@ -509,11 +496,13 @@ impl Dnd {
         target_window: xproto::Window,
     ) -> Result<(), X11Error> {
         let atoms = self.xconn.atoms();
-        let (accepted, action) = if self.shared.accepted.load(Ordering::Relaxed) {
-            (1, atoms[XdndActionPrivate])
-        } else {
-            (0, atoms[DndNone])
+        let Some(state) = &self.state else {
+            return Err(X11Error::UnexpectedNull(
+                "Drag-and-drop state was not initialized (called `send_finished` before XdndEnter",
+            ));
         };
+        let (accepted, action) =
+            if state.accepted { (1, atoms[XdndActionPrivate]) } else { (0, atoms[DndNone]) };
         self.xconn
             .send_client_msg(target_window, target_window, atoms[XdndFinished] as _, None, [
                 this_window,

@@ -5,7 +5,6 @@ use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::os::raw::*;
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::{cmp, env};
 
@@ -13,7 +12,6 @@ use dpi::{PhysicalInsets, PhysicalPosition, PhysicalSize, Position, Size};
 use tracing::{debug, info, warn};
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::Cursor;
-use winit_core::data_transfer::DataTransferId;
 use winit_core::error::{NotSupportedError, RequestError};
 use winit_core::event::{SurfaceSizeWriter, WindowEvent};
 use winit_core::event_loop::AsyncRequestSerial;
@@ -23,8 +21,8 @@ use winit_core::monitor::{
 };
 use winit_core::window::{
     CursorGrabMode, ImeCapabilities, ImeRequest as CoreImeRequest, ImeRequestError,
-    ResizeDirection, Theme, UnknownDataTransfer, UserAttentionType, Window as CoreWindow,
-    WindowAttributes, WindowButtons, WindowId, WindowLevel,
+    ResizeDirection, Theme, UserAttentionType, Window as CoreWindow, WindowAttributes,
+    WindowButtons, WindowId, WindowLevel,
 };
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::properties::{WmHints, WmSizeHints, WmSizeHintsSpecification};
@@ -41,7 +39,6 @@ use crate::atoms::{
     _NET_WM_WINDOW_TYPE, _XEMBED, AtomName, CARD32, UTF8_STRING, WM_CHANGE_STATE,
     WM_CLIENT_MACHINE, WM_DELETE_WINDOW, WM_PROTOCOLS, WM_STATE, XdndAware,
 };
-use crate::dnd::DndSharedState;
 use crate::event_loop::{
     ALL_MASTER_DEVICES, ActivationItem, ActiveEventLoop, CookieResultExt, ICONIC_STATE, VoidCookie,
     WakeSender, X11Error, xinput_fp1616_to_float,
@@ -312,26 +309,6 @@ impl CoreWindow for Window {
     fn rwh_06_window_handle(&self) -> &dyn rwh_06::HasWindowHandle {
         self
     }
-
-    fn reject_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
-        if self.dnd_shared.transfer_id() != id {
-            return Err(UnknownDataTransfer(id));
-        }
-
-        self.dnd_shared.accepted.store(false, Ordering::Relaxed);
-
-        Ok(())
-    }
-
-    fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
-        if self.dnd_shared.transfer_id() != id {
-            return Err(UnknownDataTransfer(id));
-        }
-
-        self.dnd_shared.accepted.store(true, Ordering::Relaxed);
-
-        Ok(())
-    }
 }
 
 impl rwh_06::HasDisplayHandle for Window {
@@ -443,11 +420,10 @@ unsafe impl Sync for UnownedWindow {}
 #[derive(Debug)]
 pub struct UnownedWindow {
     pub(crate) xconn: Arc<XConnection>, // never changes
-    dnd_shared: Arc<DndSharedState>,
-    xwindow: xproto::Window, // never changes
+    xwindow: xproto::Window,            // never changes
     #[allow(dead_code)]
     visual: u32, // never changes
-    root: xproto::Window,    // never changes
+    root: xproto::Window,               // never changes
     #[allow(dead_code)]
     screen_id: i32, // never changes
     sync_counter_id: Option<NonZeroU32>, // never changes
@@ -669,12 +645,9 @@ impl UnownedWindow {
             .visual;
         }
 
-        let dnd_shared = event_loop.dnd.borrow().shared.clone();
-
         #[allow(clippy::mutex_atomic)]
         let mut window = UnownedWindow {
             xconn: Arc::clone(xconn),
-            dnd_shared,
             xwindow: xwindow as xproto::Window,
             visual,
             root,

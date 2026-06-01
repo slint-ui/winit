@@ -1161,35 +1161,7 @@ impl CoreWindow for Window {
         self
     }
 
-    fn accept_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
-        let state = self.window_state.lock().unwrap();
-        if let Some(shared) = &state.drop_data_shared {
-            if shared.transfer_id() != id {
-                return Err(UnknownDataTransfer(id));
-            }
-
-            shared.accepted.store(true, Ordering::Relaxed);
-
-            Ok(())
-        } else {
-            return Err(UnknownDataTransfer(id));
-        }
-    }
-
-    fn reject_drag(&self, id: DataTransferId) -> Result<(), UnknownDataTransfer> {
-        let state = self.window_state.lock().unwrap();
-        if let Some(shared) = &state.drop_data_shared {
-            if shared.transfer_id() != id {
-                return Err(UnknownDataTransfer(id));
-            }
-
-            shared.accepted.store(true, Ordering::Relaxed);
-
-            Ok(())
-        } else {
-            return Err(UnknownDataTransfer(id));
-        }
-    }
+    // TODO: `set_valid_actions`
 }
 
 pub(super) struct InitData<'a> {

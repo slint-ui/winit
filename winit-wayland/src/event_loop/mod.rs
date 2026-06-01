@@ -14,21 +14,24 @@ use calloop::ping::Ping;
 use dpi::LogicalSize;
 use rustix::event::{PollFd, PollFlags};
 use rustix::pipe::{self, PipeFlags};
+use sctk::data_device_manager::data_offer;
 use sctk::reexports::calloop_wayland_source::WaylandSource;
 use sctk::reexports::client::{Connection, QueueHandle, globals};
 use tracing::warn;
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{CustomCursor as CoreCustomCursor, CustomCursorSource};
+use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypedData};
 use winit_core::error::{EventLoopError, NotSupportedError, OsError, RequestError};
 use winit_core::event::{DeviceEvent, StartCause, SurfaceSizeWriter, WindowEvent};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents,
-    OwnedDisplayHandle as CoreOwnedDisplayHandle,
+    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask,
+    OwnedDisplayHandle as CoreOwnedDisplayHandle, UnknownDataTransfer,
 };
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
 use winit_core::window::Theme;
 
+use crate::dnd::{DndActionSet, MimeData, MimeType};
 use crate::types::cursor::WaylandCustomCursor;
 
 mod proxy;
@@ -677,6 +680,71 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
     fn rwh_06_handle(&self) -> &dyn rwh_06::HasDisplayHandle {
         self
+    }
+
+    fn fetch_data_transfer(
+        &self,
+        id: DataTransferId,
+        type_: &dyn TransferType,
+    ) -> Result<Box<dyn TypedData>, RequestError> {
+        let mut state = self.state.borrow_mut();
+        let Some(current_drag) = state.dnd_state.current_drag() else {
+            return Err(RequestError::Ignored);
+        };
+
+        if current_drag.transfer_id() != id {
+            return Err(RequestError::Ignored);
+        }
+
+        let Some(mime_type) = current_drag.find_type_dyn(type_) else {
+            return Err(RequestError::Ignored);
+        };
+
+        let mime_type_str = mime_type.to_string();
+
+        // create a pipe
+        let (readfd, writefd) =
+            pipe::pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK).map_err(|e| os_error!(e))?;
+
+        data_offer::receive_to_fd(current_drag, mime_type_str, writefd);
+
+        let mime_type = mime_type.clone();
+
+        state.dnd_state.accept_type(mime_type.clone());
+
+        Ok(Box::new(MimeData::new(readfd, mime_type)))
+    }
+
+    fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
+        let state = self.state.borrow();
+        let Some(state) = state.dnd_state.current_drag() else {
+            return Err(RequestError::Ignored);
+        };
+
+        if state.transfer_id() != id {
+            return Err(RequestError::Ignored);
+        }
+
+        Ok(Box::new(state.clone()))
+    }
+
+    fn set_valid_actions(
+        &self,
+        id: DataTransferId,
+        mask: &dyn DndActionMask,
+    ) -> Result<(), UnknownDataTransfer> {
+        let state = self.state.borrow();
+        let Some(state) = state.dnd_state.current_drag() else {
+            return Err(UnknownDataTransfer(id));
+        };
+
+        if state.transfer_id() != id {
+            return Err(UnknownDataTransfer(id));
+        }
+
+        state.set_actions(&DndActionSet::from_dyn(mask));
+
+        Ok(())
     }
 }
 

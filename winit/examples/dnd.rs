@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::data_transfer::{TypeHint, TypedData};
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, EventLoop, DndActions};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 #[path = "util/fill.rs"]
@@ -95,24 +95,18 @@ impl ApplicationHandler for Application {
                     "Types: {:#?}",
                     data_transfer
                         .available_types()
-                        .into_iter()
-                        .filter_map(|ty| ty.hint())
-                        .collect::<Vec<_>>()
                 );
 
-                let wanted_types = [TypeHint::Html, TypeHint::UriList, TypeHint::Plaintext]
+                let valid_type = [TypeHint::Html, TypeHint::UriList, TypeHint::Plaintext]
                     .into_iter()
-                    .filter(|ty| data_transfer.has_type(ty))
-                    .collect::<Vec<_>>();
+                    .find(|ty| data_transfer.has_type(ty));
 
-                info!("Supported types: {:#?}", wanted_types);
-
-                let Some(type_) = wanted_types.first().copied() else {
-                    window.reject_drag(id).unwrap();
+                let Some(type_) = valid_type else {
+                    event_loop.set_valid_actions(id, &DndActions::none()).unwrap();
                     return;
                 };
 
-                window.accept_drag_type(id, &type_).unwrap();
+                event_loop.set_valid_actions(id, &DndActions::all()).unwrap();
 
                 self.last_dnd_fetch = event_loop.fetch_data_transfer(id, &type_).ok();
 

@@ -20,7 +20,6 @@ use winit_core::keyboard::ModifiersState;
 
 use crate::state::WinitState;
 
-mod dnd;
 mod keyboard;
 mod pointer;
 mod text_input;
