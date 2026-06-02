@@ -28,6 +28,7 @@ use winit_core::event::WindowEvent;
 use winit_core::event_loop::{DndActionMask, DndActions};
 use winit_core::window::WindowId;
 
+use crate::make_data_transfer_id;
 use crate::state::WinitState;
 
 impl DataSourceHandler for WinitState {
@@ -89,24 +90,18 @@ impl DataSourceHandler for WinitState {
             },
             SendData::String(str) => match mime.charset().unwrap_or(Charset::Utf16) {
                 Charset::Utf8 => {
-                    if fd.write_all(str.as_bytes()).is_err() {
-                        return;
-                    }
+                    let _ = fd.write_all(str.as_bytes());
                 },
                 Charset::Utf16 => {
                     let utf16_binary = str
                         .encode_utf16()
                         .flat_map(|uint16| uint16.to_le_bytes())
                         .collect::<Vec<_>>();
-                    if fd.write_all(&utf16_binary).is_err() {
-                        return;
-                    }
+                    let _ = fd.write_all(&utf16_binary);
                 },
             },
             SendData::Bytes(binary) => {
-                if fd.write_all(&binary).is_err() {
-                    return;
-                }
+                let _ = fd.write_all(&binary);
             },
         }
     }
@@ -462,6 +457,7 @@ impl DataTransfer for DataOffer {
 /// transfer operation, along with the data that the source represents
 #[derive(Debug)]
 pub struct DragSource {
+    data_transfer_id: DataTransferId,
     /// The `WlDataSource` generated from `data`.
     ///
     /// This is stored internally, as if this source is dropped then the
@@ -471,20 +467,22 @@ pub struct DragSource {
     data_source: Option<SctkDragSource>,
     /// The supplied [`DataTransferSend`].
     data: Box<dyn DataTransferSend>,
-    /// The set of available actions.
-    action_set: DndActionSet,
     /// (Optionally) an icon for the drag-and-drop operation.
     icon: Option<WlSurface>,
 }
 
 impl DragSource {
     pub(crate) fn new(
+        data_transfer_id: DataTransferId,
         data_source: Option<SctkDragSource>,
         data: Box<dyn DataTransferSend>,
-        action_set: DndActionSet,
         icon: Option<WlSurface>,
     ) -> Self {
-        Self { data_source, action_set, data, icon }
+        Self { data_transfer_id, data_source, data, icon }
+    }
+
+    pub fn transfer_id(&self) -> DataTransferId {
+        self.data_transfer_id
     }
 
     /// The underlying externally-visible `WlDataSource`, or `None` if this operation is purely internal.
@@ -682,7 +680,7 @@ impl DataDeviceHandler for WinitState {
                 .map(|str| MimeType::parse(str.clone()))
                 .collect::<Vec<_>>()
                 .into(),
-            transfer_id: DataTransferId::from_raw(drag.serial as i64),
+            transfer_id: make_data_transfer_id(data_device, drag.serial),
             data: drag.inner().clone(),
             window_id,
         });
@@ -701,7 +699,7 @@ impl DataDeviceHandler for WinitState {
 
         self.events_sink.push_window_event(
             WindowEvent::DragEntered {
-                id: DataTransferId::from_raw(drag.serial.into()),
+                id: make_data_transfer_id(data_device, drag.serial),
                 position: Some(position),
             },
             window_id,
@@ -758,7 +756,7 @@ impl DataDeviceHandler for WinitState {
 
         self.events_sink.push_window_event(
             WindowEvent::DragPosition {
-                id: DataTransferId::from_raw(drag.serial.into()),
+                id: make_data_transfer_id(data_device, drag.serial),
                 position,
             },
             window_id,
@@ -786,7 +784,7 @@ impl DataDeviceHandler for WinitState {
         let window_id = crate::make_wid(&drag.surface);
 
         self.events_sink.push_window_event(
-            WindowEvent::DragDropped { id: DataTransferId::from_raw(drag.serial.into()) },
+            WindowEvent::DragDropped { id: make_data_transfer_id(data_device, drag.serial) },
             window_id,
         );
 

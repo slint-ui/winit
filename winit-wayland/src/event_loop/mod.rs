@@ -40,7 +40,7 @@ use winit_core::window::Theme;
 
 use crate::dnd::{DndActionSet, MimeData};
 use crate::types::cursor::WaylandCustomCursor;
-use crate::{DragSource, MimeType, image_to_buffer};
+use crate::{DragSource, MimeType, image_to_buffer, make_data_transfer_id};
 
 mod proxy;
 pub mod sink;
@@ -781,13 +781,13 @@ impl RootActiveEventLoop for ActiveEventLoop {
             .lock()
             .unwrap();
         let source_surface = source_window_state.window.wl_surface();
-        let data_device = state
-            .seats
-            .get(&source_surface.id())
-            .ok_or(NotSupportedError::new(
-                "Tried to initiate drag, but source window ID was invalid",
-            ))?
-            .data_device()
+        // HACK: How do we get the correct seat for pointers here?
+        let data_device = source_window_state
+            .focused_seats()
+            .find_map(|seat_id| {
+                let seat = state.seats.get(seat_id)?;
+                seat.data_device()
+            })
             .ok_or(NotSupportedError::new(
                 "Tried to initiate drag, but source window does not have the pointer capability",
             ))?;
@@ -841,18 +841,20 @@ impl RootActiveEventLoop for ActiveEventLoop {
             ),
         }
 
+        let transfer_id = make_data_transfer_id(data_device.inner(), serial);
+
         std::mem::drop(pool);
         std::mem::drop(source_window_state);
         std::mem::drop(windows);
 
         state.dnd_state.set_send_drag(DragSource::new(
+            transfer_id,
             data_source,
             send_data,
-            action_set,
             icon_surface,
         ));
 
-        todo!()
+        Ok(transfer_id)
     }
 }
 

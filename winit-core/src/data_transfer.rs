@@ -321,7 +321,6 @@ type SendDataCallback<T> = Box<dyn Fn(&T) -> SendData>;
 pub struct DataTransferSendBuilder<T, M = ExternalTransferMarker> {
     state: T,
     types: Vec<(Box<dyn TransferType>, SendDataCallback<T>)>,
-    ///
     _is_internal: PhantomData<M>,
 }
 

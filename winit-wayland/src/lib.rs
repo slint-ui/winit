@@ -18,13 +18,16 @@
 #![allow(clippy::mutable_key_type)]
 
 use std::ffi::c_void;
+use std::hash::BuildHasher;
 use std::ptr::NonNull;
 
 use dpi::{LogicalSize, PhysicalSize};
 use sctk::reexports::client::Proxy;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::shm::slot::{Buffer, CreateBufferError, SlotPool};
+use wayland_client::protocol::wl_data_device::WlDataDevice;
 use wayland_client::protocol::wl_shm::Format;
+use winit_core::data_transfer::DataTransferId;
 use winit_core::event_loop::ActiveEventLoop as CoreActiveEventLoop;
 use winit_core::window::{
     ActivationToken, PlatformWindowAttributes, Window as CoreWindow, WindowId,
@@ -149,6 +152,16 @@ impl PlatformWindowAttributes for WindowAttributesWayland {
 #[inline]
 fn make_wid(surface: &WlSurface) -> WindowId {
     WindowId::from_raw(surface.id().as_ptr() as usize)
+}
+
+/// Create a `DataTransferId` for the given data device and serial.
+///
+/// It's currently unclear if this will result in the same ID when transferring to the same application.
+#[inline]
+fn make_data_transfer_id(data_device: &WlDataDevice, serial: u32) -> DataTransferId {
+    const BUILD_HASHER: foldhash::fast::FixedState = foldhash::fast::FixedState::with_seed(0);
+
+    DataTransferId::from_raw(BUILD_HASHER.hash_one((data_device.id(), serial)) as i64)
 }
 
 /// The default routine does floor, but we need round on Wayland.

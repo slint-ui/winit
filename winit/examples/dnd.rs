@@ -2,9 +2,10 @@ use std::error::Error;
 
 use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
-use winit::data_transfer::{TypeHint, TypedData};
-use winit::event::WindowEvent;
+use winit::data_transfer::{DataTransferId, DataTransferSendBuilder, TypeHint, TypedData};
+use winit::event::{MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, DndActions, EventLoop};
+use winit::icon::{Icon, RgbaIcon};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 #[path = "util/fill.rs"]
@@ -22,16 +23,30 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 /// Application state and event handling.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Application {
     window: Option<Box<dyn Window>>,
     last_dnd_fetch: Option<Box<dyn TypedData>>,
+    last_drag_start: Option<DataTransferId>,
+    drag_icon: Icon,
 }
 
 impl Application {
     fn new() -> Self {
-        Self::default()
+        let drag_icon = load_icon(include_bytes!("data/icon.png"));
+
+        Self { window: None, last_dnd_fetch: None, last_drag_start: None, drag_icon }
     }
+}
+
+fn load_icon(bytes: &[u8]) -> Icon {
+    let (icon_rgba, icon_width, icon_height) = {
+        let image = image::load_from_memory(bytes).unwrap().into_rgba8();
+        let (width, height) = image.dimensions();
+        let rgba = image.into_raw();
+        (rgba, width, height)
+    };
+    RgbaIcon::new(icon_rgba, icon_width, icon_height).expect("Failed to open icon").into()
 }
 
 impl ApplicationHandler for Application {
@@ -44,10 +59,33 @@ impl ApplicationHandler for Application {
     fn window_event(
         &mut self,
         event_loop: &dyn ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
         match event {
+            WindowEvent::PointerButton { button, state, .. } => {
+                let Some(button) = button.mouse_button() else {
+                    return;
+                };
+
+                if button == MouseButton::Left && state.is_pressed() {
+                    if let Some(last_drag) = self.last_drag_start.take() {
+                        let _ = event_loop.cancel_drag(last_drag);
+                    }
+
+                    self.last_drag_start = dbg!(event_loop.start_drag(
+                        window_id,
+                        DataTransferSendBuilder::new(())
+                            .with_type(TypeHint::Plaintext, |()| {
+                                "Winit example".to_string().into()
+                            })
+                            .build(),
+                        &DndActions::new_copy(),
+                        Some(self.drag_icon.clone()),
+                    ))
+                    .ok();
+                }
+            },
             WindowEvent::DragLeft { .. } => {
                 info!("{event:?}");
                 self.last_dnd_fetch = None;
