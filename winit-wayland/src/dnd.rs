@@ -54,7 +54,7 @@ impl DataSourceHandler for WinitState {
         mime: String,
         mut fd: WritePipe,
     ) {
-        let Some(data) = self.dnd_state.send_drag_data() else {
+        let Some(data) = self.dnd_state.send_drag_data_mut() else {
             // TODO: Is there a way to explicitly express that the data was not sent?
             return;
         };
@@ -88,17 +88,19 @@ impl DataSourceHandler for WinitState {
                     }
                 }
             },
-            SendData::String(str) => match mime.charset().unwrap_or(Charset::Utf16) {
-                Charset::Utf8 => {
-                    let _ = fd.write_all(str.as_bytes());
-                },
-                Charset::Utf16 => {
-                    let utf16_binary = str
-                        .encode_utf16()
-                        .flat_map(|uint16| uint16.to_le_bytes())
-                        .collect::<Vec<_>>();
-                    let _ = fd.write_all(&utf16_binary);
-                },
+            SendData::String(str) => {
+                match mime.parse_charset().or(mime.default_charset()).unwrap_or_default() {
+                    Charset::Utf8 => {
+                        let _ = fd.write_all(str.as_bytes());
+                    },
+                    Charset::Utf16 => {
+                        let utf16_binary = str
+                            .encode_utf16()
+                            .flat_map(|uint16| uint16.to_ne_bytes())
+                            .collect::<Vec<_>>();
+                        let _ = fd.write_all(&utf16_binary);
+                    },
+                }
             },
             SendData::Bytes(binary) => {
                 let _ = fd.write_all(&binary);
@@ -151,8 +153,9 @@ impl DataSourceHandler for WinitState {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+#[derive(Default, Debug, PartialEq, Eq, Clone, Hash)]
 enum Charset {
+    #[default]
     Utf8,
     Utf16,
 }
@@ -241,18 +244,18 @@ impl MimeType {
         let downcast_failed = downcast.is_none();
         // This filter is a bit hacky, but it's the only way to ensure that we always
         // return the same type.
-        let from_hint = type_.hint().filter(|_| downcast_failed).into_iter().flat_map(|hint| {
+        let from_hint = Some(()).filter(|_| downcast_failed).into_iter().flat_map(move |()| {
             Self::MIME_HINT_MAP
                 .iter()
-                .filter(move |(_, haystack)| *haystack == hint)
-                .map(move |(mime, _)| Self { mime: mime.to_string().into(), hint: Some(hint) })
+                .filter(move |(_, haystack)| TransferType::matches(haystack, type_))
+                .map(move |(mime, _)| Self { mime: mime.to_string().into(), hint: type_.hint() })
         });
 
         downcast.into_iter().chain(from_hint)
     }
 
     // TODO: We should properly parse MIME types using `mime` or a similar crate.
-    fn charset(&self) -> Option<Charset> {
+    fn parse_charset(&self) -> Option<Charset> {
         let (_essence, options) = self.mime.split_once(';')?;
 
         let (_, charset) = options.split_once("charset=")?;
@@ -263,6 +266,14 @@ impl MimeType {
             Some(Charset::Utf16)
         } else {
             None
+        }
+    }
+
+    fn default_charset(&self) -> Option<Charset> {
+        match self.hint? {
+            TypeHint::Plaintext => Some(Charset::Utf8),
+            TypeHint::Html => Some(Charset::Utf16),
+            _ => None,
         }
     }
 
@@ -378,7 +389,7 @@ impl TypedData for MimeData {
         };
 
         // Default charset is UTF-16 for some reason
-        let charset = self.mime_type.charset().unwrap_or(Charset::Utf16);
+        let charset = self.mime_type.parse_charset().unwrap_or(Charset::Utf16);
 
         match charset {
             Charset::Utf8 => {
@@ -489,8 +500,8 @@ impl DragSource {
     }
 
     /// Per-type data to be sent. See [`DataTransferSend`].
-    pub fn data(&self) -> &dyn DataTransferSend {
-        &*self.data
+    pub fn data(&mut self) -> &mut dyn DataTransferSend {
+        &mut *self.data
     }
 }
 
@@ -612,8 +623,8 @@ impl DndState {
         self.send_drag = None;
     }
 
-    pub(crate) fn send_drag_data(&self) -> Option<&dyn DataTransferSend> {
-        self.send_drag.as_ref().map(|send| send.data())
+    pub(crate) fn send_drag_data_mut(&mut self) -> Option<&mut dyn DataTransferSend> {
+        self.send_drag.as_mut().map(|send| send.data())
     }
 }
 

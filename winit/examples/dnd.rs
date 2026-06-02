@@ -86,21 +86,48 @@ impl ApplicationHandler for Application {
                     let result = event_loop.start_drag(
                         window_id,
                         DataTransferSendBuilder::new(())
-                            .with_type(TypeHint::Plaintext, |()| "Winit example".to_string().into())
-                            .with_type(TypeHint::Html, |()| {
-                                "<strong>Winit</strong> example".to_string().into()
+                            .with_type(TypeHint::Plaintext, |(), _| {
+                                Some("Winit example".to_string())
                             })
-                            .with_type(TypeHint::Image { extension_hint: Some("png") }, |()| {
-                                DRAG_IMAGE.to_vec().into()
+                            .with_type(TypeHint::Html, |(), _| {
+                                Some("<span><strong>Winit</strong> example</span>".to_string())
                             })
-                            .with_type(TypeHint::UriList, |()| {
+                            // You can advertise a `TypeHint` that can match many types, and switch
+                            // inside the callback. For example, this will match any image type. This
+                            // may be desirable on some platforms which restrict the set of image types
+                            // that can be sent.
+                            .with_type(TypeHint::Image { extension_hint: None }, |(), ty| {
+                                let hint = ty.hint()?;
+                                match hint {
+                                    TypeHint::Image { extension_hint: None | Some("png") } => {
+                                        info!("Destination requested image as png");
+                                        Some(DRAG_IMAGE.to_vec())
+                                    },
+                                    TypeHint::Image { extension_hint: Some(ext) } => {
+                                        info!(
+                                            "Destination requested image as {ext}, converting..."
+                                        );
+                                        let image = image::load_from_memory(DRAG_IMAGE)
+                                            .unwrap()
+                                            .into_rgb8();
+                                        let format = image::ImageFormat::from_extension(ext)?;
+                                        let mut out_buf = Vec::new();
+                                        let mut out_writer = std::io::Cursor::new(&mut out_buf);
+
+                                        image.write_to(&mut out_writer, format).ok()?;
+
+                                        Some(out_buf)
+                                    },
+                                    _ => None,
+                                }
+                            })
+                            .with_type(TypeHint::UriList, |(), _| {
                                 let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
                                 let root = manifest_dir.parent().unwrap();
                                 let this_file = root.join(file!());
                                 let icon_file = this_file.parent().unwrap().join("data/icon.png");
                                 let icon_file = icon_file.display();
-
-                                vec![OsString::from(format!("file://{icon_file}"))].into()
+                                Some(vec![OsString::from(format!("file://{icon_file}"))])
                             })
                             .build(),
                         &DndActions::All,
@@ -130,6 +157,31 @@ impl ApplicationHandler for Application {
                             let uris = data.try_as_uris().unwrap();
                             info!("{uris:#?}");
                         },
+                        Some(TypeHint::Image { extension_hint: ext }) => {
+                            let mut bytes = Vec::new();
+                            'read_image: {
+                                if data.try_read().unwrap().read_to_end(&mut bytes).is_err() {
+                                    warn!("Could not read!");
+                                    break 'read_image;
+                                }
+
+                                let format = ext.and_then(image::ImageFormat::from_extension);
+
+                                let reader = std::io::Cursor::new(&bytes[..]);
+                                let reader = match format {
+                                    Some(fmt) => image::ImageReader::with_format(reader, fmt),
+                                    None => image::ImageReader::new(reader),
+                                };
+
+                                if let Ok(image) = reader.decode() {
+                                    let width = image.width();
+                                    let height = image.height();
+                                    info!("Received image ({width}x{height})");
+                                } else {
+                                    warn!("Failed to decode jpeg");
+                                }
+                            }
+                        },
                         _ => {
                             unreachable!("Received a type we didn't ask for!");
                         },
@@ -151,9 +203,21 @@ impl ApplicationHandler for Application {
 
                 info!("Types: {:#?}", data_transfer.available_types());
 
-                let valid_type = [TypeHint::Html, TypeHint::UriList, TypeHint::Plaintext]
-                    .into_iter()
-                    .find(|ty| data_transfer.has_type(ty));
+                let readable_image_types = image::ImageFormat::all()
+                    .filter(|fmt| fmt.reading_enabled())
+                    .filter_map(|fmt| {
+                        let ext = fmt.extensions_str().first()?;
+
+                        Some(TypeHint::Image { extension_hint: Some(ext) })
+                    });
+
+                let mut valid_types = readable_image_types.chain([
+                    TypeHint::Html,
+                    TypeHint::UriList,
+                    TypeHint::Plaintext,
+                ]);
+
+                let valid_type = valid_types.find(|ty| data_transfer.has_type(ty));
 
                 let Some(type_) = valid_type else {
                     event_loop.set_valid_actions(id, &DndActions::none()).unwrap();

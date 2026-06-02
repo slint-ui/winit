@@ -159,7 +159,7 @@ impl TransferType for TypeHint {
     }
 
     fn matches(&self, other: &dyn TransferType) -> bool {
-        other.hint() == Some(*self)
+        other.hint().is_some_and(|hint| self.matches(&hint))
     }
 }
 
@@ -288,7 +288,7 @@ impl From<Vec<OsString>> for SendData {
 /// implementation of this trait dynamically in a cross-platform way, use [`DataTransferSendBuilder`].
 pub trait DataTransferSend: DataTransfer {
     /// Get the data for the specified type, or `None` if this value does not supply the given data type.
-    fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData>;
+    fn data_for_type(&mut self, type_: &dyn TransferType) -> Option<SendData>;
 
     /// If `true`, this data transfer is only valid for the application sending the data.
     ///
@@ -305,7 +305,7 @@ pub enum InternalTransferMarker {}
 /// Marker for a [`DataTransferSendBuilder`] which is external.
 pub enum ExternalTransferMarker {}
 
-type SendDataCallback<T> = Box<dyn Fn(&T) -> SendData>;
+type SendDataCallback<T> = Box<dyn Fn(&mut T, &dyn TransferType) -> Option<SendData>>;
 
 /// Dynamic builder for an implementation of [`DataTransferSend`].
 ///
@@ -350,7 +350,7 @@ impl<T> DataTransferSend for DataTransferSendBuilder<T, ExternalTransferMarker>
 where
     T: fmt::Debug + 'static,
 {
-    fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData> {
+    fn data_for_type(&mut self, type_: &dyn TransferType) -> Option<SendData> {
         self.data_for_type(type_)
     }
 
@@ -363,7 +363,7 @@ impl<T> DataTransferSend for DataTransferSendBuilder<T, InternalTransferMarker>
 where
     T: fmt::Debug + 'static,
 {
-    fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData> {
+    fn data_for_type(&mut self, type_: &dyn TransferType) -> Option<SendData> {
         self.data_for_type(type_)
     }
 
@@ -389,29 +389,40 @@ impl<T> DataTransferSendBuilder<T, InternalTransferMarker> {
 }
 
 impl<T, M> DataTransferSendBuilder<T, M> {
-    fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData> {
+    fn data_for_type(&mut self, type_: &dyn TransferType) -> Option<SendData> {
         let (_, func) = self.types.iter().find(|(ty, _)| ty.matches(type_))?;
 
-        Some(func(&self.state))
+        func(&mut self.state, type_)
     }
 
     /// Add a callback which converts the builder's state to the given type. In
     /// most cases, `type_` will be [`TypeHint`].
-    pub fn add_type<Ty, F>(&mut self, type_: Ty, func: F) -> &mut Self
+    pub fn add_type<Ty, F, O>(&mut self, type_: Ty, func: F) -> &mut Self
     where
         Ty: TransferType,
-        F: Fn(&T) -> SendData + 'static,
+        F: Fn(&mut T, &dyn TransferType) -> Option<O> + 'static,
+        O: Into<SendData>,
     {
-        self.types.push((Box::new(type_), Box::new(func)));
+        self.types
+            .push((Box::new(type_), Box::new(move |state, ty| func(state, ty).map(Into::into))));
         self
     }
 
     /// Return a new builder, adding a callback which converts the builder's state
-    /// to the given type. In most cases, `type_` will be [`TypeHint`].
-    pub fn with_type<Ty, F>(mut self, type_: Ty, func: F) -> Self
+    /// to the given type.
+    ///
+    /// For cross-platform use, `type_` will be [`TypeHint`]. The closure additionally receives
+    /// a [`TransferType`], which is not necessarily the same as `type_` for the following reasons:
+    ///
+    /// - The OS may have multiple types which are equivalent to the supplied type
+    /// - `TypeHint::Audio` and `TypeHint::Image` with `extension_hint: None` will advertise all
+    ///   supported audio and image formats, in which case the closure may receive a type with
+    ///   an extension chosen by the receiving application.
+    pub fn with_type<Ty, F, O>(mut self, type_: Ty, func: F) -> Self
     where
         Ty: TransferType,
-        F: Fn(&T) -> SendData + 'static,
+        F: Fn(&mut T, &dyn TransferType) -> Option<O> + 'static,
+        O: Into<SendData>,
     {
         self.add_type(type_, func);
         self
