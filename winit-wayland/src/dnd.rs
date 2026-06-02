@@ -76,7 +76,8 @@ impl DataSourceHandler for WinitState {
                     return;
                 }
 
-                // TODO: Is there something better we can do than unconditionally encoding as `text/uri-list`?
+                // TODO: Is there something better we can do than unconditionally encoding as
+                // `text/uri-list`?
                 for os_str in iter {
                     // TODO: Is `as_encoded_bytes` correct here?
                     if fd
@@ -351,8 +352,8 @@ impl MimeData {
     }
 
     fn try_as_file(&mut self) -> Option<File> {
+        // TODO: Is it ok that this may only work once, depending on what the fd points to?
         let fd_clone =
-            // TODO: Is it ok that this may only work once, depending on what the fd points to?
             if let Ok(cloned) = self.fd.as_ref()?.try_clone() { cloned } else { self.fd.take()? };
         Some(fd_clone.into())
     }

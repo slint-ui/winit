@@ -177,9 +177,9 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
     ///   [`DndActions`](crate::data_transfer::DndActions).
     /// - `icon` -  icon to show while dragging.
     ///
-    /// Some platforms have a more-expressive way of setting the visual component of a drag operation. For
-    /// those platforms, consider using the platform-specific implementation of [`DataTransferSend`] for
-    /// `send_data` and set this field to `None`.
+    /// Some platforms have a more-expressive way of setting the visual component of a drag
+    /// operation. For those platforms, consider using the platform-specific implementation of
+    /// [`DataTransferSend`] for `send_data` and set this field to `None`.
     fn start_drag(
         &self,
         source: WindowId,
@@ -198,8 +198,8 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
 
     /// Cancel a drag-and-drop operation.
     ///
-    /// This can be called on data transfers initiated by this application, as well as data transfers
-    /// received from an external application.
+    /// This can be called on data transfers initiated by this application, as well as data
+    /// transfers received from an external application.
     fn cancel_drag(&self, id: DataTransferId) -> Result<(), RequestError> {
         let _ = id;
         Err(RequestError::NotSupported(NotSupportedError::new(
@@ -209,8 +209,8 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
 }
 
 const DATA_TRANSFER_UNSUPPORTED_ERROR_MESSAGE: &str = {
-    "Cross-application data transfer (e.g. drag-and-drop, clipboard) is unsupported on \
-    this platform"
+    "Cross-application data transfer (e.g. drag-and-drop, clipboard) is unsupported on this \
+     platform"
 };
 
 impl HasDisplayHandle for dyn ActiveEventLoop + '_ {

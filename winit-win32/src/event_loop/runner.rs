@@ -106,8 +106,7 @@ impl EventLoopRunner {
     }
 
     pub(crate) fn register_data_transfer(&self, id: DataTransferId, data: Rc<DataObject>) {
-        *self.drag_state.borrow_mut() =
-            Some(DragState { id, data, actions: DndActions::none() });
+        *self.drag_state.borrow_mut() = Some(DragState { id, data, actions: DndActions::none() });
     }
 
     pub(crate) fn remove_data_transfer(&self, id: DataTransferId) {

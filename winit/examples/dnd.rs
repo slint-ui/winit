@@ -93,8 +93,9 @@ impl ApplicationHandler for Application {
                                 Some("<span><strong>Winit</strong> example</span>".to_string())
                             })
                             // You can advertise a `TypeHint` that can match many types, and switch
-                            // inside the callback. For example, this will match any image type. This
-                            // may be desirable on some platforms which restrict the set of image types
+                            // inside the callback. For example, this will match any image type.
+                            // This may be desirable on some platforms
+                            // which restrict the set of image types
                             // that can be sent.
                             .with_type(TypeHint::Image { extension_hint: None }, |(), ty| {
                                 let hint = ty.hint()?;

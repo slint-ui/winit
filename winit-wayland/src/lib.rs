@@ -156,7 +156,8 @@ fn make_wid(surface: &WlSurface) -> WindowId {
 
 /// Create a `DataTransferId` for the given data device and serial.
 ///
-/// It's currently unclear if this will result in the same ID when transferring to the same application.
+/// It's currently unclear if this will result in the same ID when transferring to the same
+/// application.
 #[inline]
 fn make_data_transfer_id(data_device: &WlDataDevice, serial: u32) -> DataTransferId {
     const BUILD_HASHER: foldhash::fast::FixedState = foldhash::fast::FixedState::with_seed(0);

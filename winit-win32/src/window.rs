@@ -53,7 +53,8 @@ use winit_core::icon::{Icon, RgbaIcon};
 use winit_core::monitor::{Fullscreen, MonitorHandle as CoreMonitorHandle, MonitorHandleProvider};
 use winit_core::window::{
     CursorGrabMode, ImeCapabilities, ImeRequest, ImeRequestError, ResizeDirection, Theme,
-    UserAttentionType, Window as CoreWindow, WindowAttributes, WindowButtons, WindowId, WindowLevel,
+    UserAttentionType, Window as CoreWindow, WindowAttributes, WindowButtons, WindowId,
+    WindowLevel,
 };
 
 use crate::dark_mode::try_theme;

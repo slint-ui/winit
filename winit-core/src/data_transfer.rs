@@ -46,10 +46,9 @@
 #![warn(missing_docs)]
 
 use std::ffi::OsString;
-use std::fmt;
-use std::io;
 use std::marker::PhantomData;
 use std::ops::ControlFlow;
+use std::{fmt, io};
 
 use crate::as_any::AsAny;
 
@@ -285,16 +284,18 @@ impl From<Vec<OsString>> for SendData {
 /// Trait for sending data via a data transfer.
 ///
 /// See [`StartDrag`](crate::event_loop::StartDrag) for where this is used. To build an
-/// implementation of this trait dynamically in a cross-platform way, use [`DataTransferSendBuilder`].
+/// implementation of this trait dynamically in a cross-platform way, use
+/// [`DataTransferSendBuilder`].
 pub trait DataTransferSend: DataTransfer {
-    /// Get the data for the specified type, or `None` if this value does not supply the given data type.
+    /// Get the data for the specified type, or `None` if this value does not supply the given data
+    /// type.
     fn data_for_type(&mut self, type_: &dyn TransferType) -> Option<SendData>;
 
     /// If `true`, this data transfer is only valid for the application sending the data.
     ///
-    /// This is useful on Wayland and macOS, which allow expressing internal drag-and-drop in the API.
-    /// On platforms which make no distinction between internal and external drag-and-drop, this is
-    /// ignored.
+    /// This is useful on Wayland and macOS, which allow expressing internal drag-and-drop in the
+    /// API. On platforms which make no distinction between internal and external drag-and-drop,
+    /// this is ignored.
     fn is_internal_only(&self) -> bool;
 }
 
@@ -309,7 +310,8 @@ type SendDataCallback<T> = Box<dyn Fn(&mut T, &dyn TransferType) -> Option<SendD
 
 /// Dynamic builder for an implementation of [`DataTransferSend`].
 ///
-/// On all platforms, inter-application data transfer (i.e. clipboard and drag-and-drop) works like so:
+/// On all platforms, inter-application data transfer (i.e. clipboard and drag-and-drop) works like
+/// so:
 ///
 /// - The source advertises a set of types that it can transfer.
 /// - The destination picks one or more of those types to receive.
@@ -416,8 +418,8 @@ impl<T, M> DataTransferSendBuilder<T, M> {
     ///
     /// - The OS may have multiple types which are equivalent to the supplied type
     /// - `TypeHint::Audio` and `TypeHint::Image` with `extension_hint: None` will advertise all
-    ///   supported audio and image formats, in which case the closure may receive a type with
-    ///   an extension chosen by the receiving application.
+    ///   supported audio and image formats, in which case the closure may receive a type with an
+    ///   extension chosen by the receiving application.
     pub fn with_type<Ty, F, O>(mut self, type_: Ty, func: F) -> Self
     where
         Ty: TransferType,
