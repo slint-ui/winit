@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
 use dpi::PhysicalPosition;
-use windows_sys::Win32::Foundation::{E_ABORT, HGLOBAL, HWND, POINT, POINTL, S_OK};
+use windows_sys::Win32::Foundation::{E_ABORT, E_FAIL, HGLOBAL, HWND, POINT, POINTL, S_OK};
 use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
 use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL};
 use windows_sys::Win32::System::DataExchange::RegisterClipboardFormatW;
@@ -288,7 +288,9 @@ impl FileDropHandler {
     ) -> HRESULT {
         // This function doesn't appear to be required for an `IDropTarget`.
         // An implementation would be nice however.
-        unimplemented!();
+        // Can't use `unimplemented` here as it's invalid to panic over an FFI boundary.
+        tracing::warn!("`QueryInterface` called, but it was unimplemented");
+        E_FAIL
     }
 
     unsafe extern "system" fn AddRef(this: *mut IUnknown) -> u32 {
