@@ -169,10 +169,10 @@ pub struct MimeType {
 const TEXT_URI_LIST: &str = "text/uri-list";
 // Plaintext
 const TEXT_PLAIN: &str = "text/plain";
-const TEXT_PLAIN_CHARSET_UTF8: &str = "text/plain;charset=utf-8";
+const TEXT_PLAIN_CHARSET_UTF8: &str = "text/plain; charset=utf-8";
 // HTML
 const TEXT_HTML: &str = "text/html";
-const TEXT_HTML_CHARSET_UTF8: &str = "text/html;charset=utf-8";
+const TEXT_HTML_CHARSET_UTF8: &str = "text/html; charset=utf-8";
 // RTF
 const APPLICATION_RTF: &str = "application/rtf";
 // Audio
@@ -203,11 +203,11 @@ impl MimeType {
         // Files
         (TEXT_URI_LIST, TypeHint::UriList),
         // Plaintext
-        (TEXT_PLAIN_CHARSET_UTF8, TypeHint::Plaintext),
         (TEXT_PLAIN, TypeHint::Plaintext),
+        (TEXT_PLAIN_CHARSET_UTF8, TypeHint::Plaintext),
         // HTML
-        (TEXT_HTML_CHARSET_UTF8, TypeHint::Html),
         (TEXT_HTML, TypeHint::Html),
+        (TEXT_HTML_CHARSET_UTF8, TypeHint::Html),
         // RTF
         (APPLICATION_RTF, TypeHint::Rtf),
         // Audio
@@ -234,14 +234,21 @@ impl MimeType {
         (IMAGE_X_ICON, TypeHint::Image { extension_hint: Some("ico") }),
     ];
 
-    pub(crate) fn from_dyn(type_: &dyn TransferType) -> Option<Self> {
-        type_.cast_ref::<Self>().cloned().or_else(|| {
-            let hint = type_.hint()?;
+    // Returns an iterator so that things like the multiple charsets for plaintext/HTML
+    // and the multiple ways of expressing .wav work correctly.
+    pub(crate) fn from_dyn(type_: &dyn TransferType) -> impl Iterator<Item = Self> {
+        let downcast = type_.cast_ref::<Self>().cloned();
+        let downcast_failed = downcast.is_none();
+        // This filter is a bit hacky, but it's the only way to ensure that we always
+        // return the same type.
+        let from_hint = type_.hint().filter(|_| downcast_failed).into_iter().flat_map(|hint| {
             Self::MIME_HINT_MAP
                 .iter()
-                .find_map(|(mime, haystack)| (*haystack == hint).then_some(mime))
-                .map(|mime| Self { mime: mime.to_string().into(), hint: Some(hint) })
-        })
+                .filter(move |(_, haystack)| *haystack == hint)
+                .map(move |(mime, _)| Self { mime: mime.to_string().into(), hint: Some(hint) })
+        });
+
+        downcast.into_iter().chain(from_hint)
     }
 
     // TODO: We should properly parse MIME types using `mime` or a similar crate.

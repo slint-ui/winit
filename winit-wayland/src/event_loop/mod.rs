@@ -762,8 +762,6 @@ impl RootActiveEventLoop for ActiveEventLoop {
         action_mask: &dyn DndActionMask,
         icon: Option<Icon>,
     ) -> Result<DataTransferId, RequestError> {
-        static DRAG_EVENT_SERIAL: AtomicU32 = AtomicU32::new(0);
-
         let mut state = self.state.borrow_mut();
         let action_set = DndActionSet::from_dyn(action_mask);
 
@@ -781,23 +779,33 @@ impl RootActiveEventLoop for ActiveEventLoop {
             .lock()
             .unwrap();
         let source_surface = source_window_state.window.wl_surface();
-        // HACK: How do we get the correct seat for pointers here?
-        let data_device = source_window_state
+        let seat = source_window_state
             .focused_seats()
             .find_map(|seat_id| {
-                let seat = state.seats.get(seat_id)?;
-                seat.data_device()
+                // HACK: How do we get the correct seat for pointers here?
+                state.seats.get(seat_id).filter(|seat| seat.data_device().is_some())
             })
             .ok_or(NotSupportedError::new(
                 "Tried to initiate drag, but source window does not have the pointer capability",
             ))?;
+        let data_device = seat.data_device().ok_or(NotSupportedError::new(
+            "Tried to initiate drag, but source window does not have the pointer capability",
+        ))?;
+
+        let serial = seat
+            .pointer_data()
+            .ok_or(NotSupportedError::new(
+                "Tried to initiate drag, but source window does not have the pointer capability",
+            ))?
+            // TODO: Seems like a footgun that this requires a pointer serial
+            .latest_button_serial();
 
         let data_source = if send_data.is_internal_only() {
             None
         } else {
             let mut mime_types = Vec::new();
             send_data.for_each_available_type(&mut |ty_| {
-                if let Some(mime) = MimeType::from_dyn(ty_) {
+                for mime in MimeType::from_dyn(ty_) {
                     mime_types.push(mime);
                 }
 
@@ -826,8 +834,6 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
             Some(surface)
         });
-
-        let serial = DRAG_EVENT_SERIAL.fetch_add(1, Ordering::Relaxed);
 
         match &data_source {
             Some(source) => {

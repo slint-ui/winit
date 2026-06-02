@@ -82,6 +82,10 @@ impl WinitSeatState {
     pub(crate) fn data_device(&self) -> Option<&DataDevice> {
         self.data_device.as_ref()
     }
+
+    pub(crate) fn pointer_data(&self) -> Option<&WinitPointerData> {
+        self.pointer.as_ref().and_then(|pointer| pointer.pointer().data())
+    }
 }
 
 impl SeatHandler for WinitState {

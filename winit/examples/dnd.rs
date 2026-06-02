@@ -1,4 +1,6 @@
 use std::error::Error;
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
@@ -85,8 +87,17 @@ impl ApplicationHandler for Application {
                             .with_type(TypeHint::Image { extension_hint: Some("png") }, |()| {
                                 DRAG_IMAGE.to_vec().into()
                             })
+                            .with_type(TypeHint::UriList, |()| {
+                                let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                                let root = manifest_dir.parent().unwrap();
+                                let this_file = root.join(file!());
+                                let icon_file = this_file.parent().unwrap().join("data/icon.png");
+                                let icon_file = icon_file.display();
+
+                                vec![OsString::from(format!("file://{icon_file}"))].into()
+                            })
                             .build(),
-                        &DndActions::new_copy(),
+                        &DndActions::All,
                         Some(self.drag_icon.clone()),
                     );
 
