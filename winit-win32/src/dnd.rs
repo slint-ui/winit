@@ -19,8 +19,8 @@ use windows_sys::Win32::System::Ole::{
 use windows_sys::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows_sys::core::{GUID, HRESULT};
 use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypeHint, TypedData};
-use winit_core::event_loop::DndActions;
 use winit_core::event::WindowEvent;
+use winit_core::event_loop::DndActions;
 
 use crate::definitions::{
     IDataObject, IDataObjectVtbl, IDropTarget, IDropTargetVtbl, IUnknown, IUnknownVtbl,
@@ -224,6 +224,7 @@ impl TypedData for WinTypedData {
             DataKind::String(string) => {
                 Some(Box::new(io::Cursor::new(string.clone().into_bytes())))
             },
+            // Windows URI drag-and-drop can't be neatly expressed as a binary blob.
             DataKind::Uris(_) => None,
         }
     }

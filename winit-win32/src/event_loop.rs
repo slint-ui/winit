@@ -486,7 +486,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
         type_: &dyn TransferType,
     ) -> Result<Box<dyn TypedData>, RequestError> {
         let Some(data) = self.0.data_transfer(id) else {
-            return Err(RequestError::Ignored);
+            return Err(os_error!(UnknownDataTransfer(id)).into());
         };
         let hint = type_.hint().ok_or(RequestError::Ignored)?;
 
@@ -495,7 +495,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
     fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
         let Some(data) = self.0.data_transfer(id) else {
-            return Err(RequestError::Ignored);
+            return Err(os_error!(UnknownDataTransfer(id)).into());
         };
 
         Ok(Box::new(WinDataTransfer::new(data)))
