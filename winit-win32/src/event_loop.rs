@@ -21,7 +21,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     RDW_INTERNALPAINT, RedrawWindow, SC_SCREENSAVE, ScreenToClient, ValidateRect,
 };
 use windows_sys::Win32::System::Ole::{
-    DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DoDragDrop, RevokeDragDrop,
+    DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE, DoDragDrop, RevokeDragDrop,
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, GetCurrentThreadId, INFINITE,
@@ -558,7 +558,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
         self.0.source_drag.set(Some(SourceDrag { id, allowed_actions }));
         let _guard = ClearOnDrop(&self.0.source_drag);
 
-        let mut effect_out: u32 = 0;
+        let mut effect_out: u32 = DROPEFFECT_NONE;
         let hr = unsafe {
             DoDragDrop(
                 data_object.interface_ptr(),
@@ -569,8 +569,15 @@ impl RootActiveEventLoop for ActiveEventLoop {
         };
 
         // Both `DRAGDROP_S_DROP` and `DRAGDROP_S_CANCEL` are success codes for us - the app
-        // will hear about the outcome via the buffered `DragDropped`/`DragLeft` events.
+        // will hear about the outcome via the buffered `DragDropped`/`DragLeft` events
+        // (target-side translates `effect_out == DROPEFFECT_NONE` to `DragLeft`).
+        // Log the negotiated effect so cross-process drops, which have no target-side event
+        // in this process, leave a debuggable trace of what action the remote target performed.
         if hr == DRAGDROP_S_DROP || hr == DRAGDROP_S_CANCEL {
+            tracing::trace!(
+                "DoDragDrop completed: hr=0x{hr:08x} effect_out={effect_out} \
+                 (COPY={DROPEFFECT_COPY}, MOVE={DROPEFFECT_MOVE}, LINK={DROPEFFECT_LINK})",
+            );
             Ok(id)
         } else {
             Err(os_error!(std::io::Error::other(format!("DoDragDrop failed: 0x{hr:08x}"))).into())

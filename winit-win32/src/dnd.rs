@@ -432,16 +432,27 @@ impl FileDropHandler {
             ScreenToClient(drop_handler.window, &mut pt);
         }
 
+        // Negotiate the effect first so we can pick the right outgoing event. If the app
+        // rejected the drop (e.g. via `set_valid_actions(none())`), `pick_effect` returns
+        // `DROPEFFECT_NONE`; in that case OLE reports back `effect_out == DROPEFFECT_NONE` to
+        // the source, so the matching observer-facing event is `DragLeft`, not `DragDropped` -
+        // otherwise target and source see contradictory outcomes.
+        let effect = pick_effect(actions, grfKeyState, source_allowed);
         let position = PhysicalPosition::new(pt.x as f64, pt.y as f64);
         (drop_handler.send_event)(WindowEvent::DragPosition { id: data_transfer_id, position });
-        (drop_handler.send_event)(WindowEvent::DragDropped { id: data_transfer_id });
+        let event = if effect == DROPEFFECT_NONE {
+            WindowEvent::DragLeft { id: data_transfer_id }
+        } else {
+            WindowEvent::DragDropped { id: data_transfer_id }
+        };
+        (drop_handler.send_event)(event);
         unsafe {
-            *pdwEffect = pick_effect(actions, grfKeyState, source_allowed);
+            *pdwEffect = effect;
         }
 
-        // External drop: the app's `DragDropped` handler dispatched synchronously above and has
-        // already read the data; safe to release the cache. Self-drop: the handler is buffered
-        // and hasn't run yet, so defer cleanup until after `dispatch_buffered_events` drains.
+        // External drop: the app's handler dispatched synchronously above and has already read
+        // the data; safe to release the cache. Self-drop: the handler is buffered and hasn't
+        // run yet, so defer cleanup until after `dispatch_buffered_events` drains.
         if drop_handler.runner.source_drag.get().is_some() {
             drop_handler.runner.defer_source_drag_cleanup(data_transfer_id);
         } else {
