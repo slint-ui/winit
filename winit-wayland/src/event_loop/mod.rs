@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::io::Result as IOResult;
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -20,7 +20,6 @@ use sctk::reexports::calloop_wayland_source::WaylandSource;
 use sctk::reexports::client::{Connection, QueueHandle, globals};
 use sctk::shell::WaylandSurface;
 use tracing::warn;
-use wayland_client::Proxy;
 use wayland_client::protocol::wl_shm::Format;
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{CustomCursor as CoreCustomCursor, CustomCursorSource};
@@ -31,10 +30,10 @@ use winit_core::error::{EventLoopError, NotSupportedError, OsError, RequestError
 use winit_core::event::{DeviceEvent, StartCause, SurfaceSizeWriter, WindowEvent};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask,
+    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask, DragIcon,
     OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
-use winit_core::icon::{Icon, RgbaIcon};
+use winit_core::icon::RgbaIcon;
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
 use winit_core::window::Theme;
 
@@ -760,7 +759,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
         source: WindowId,
         send_data: Box<dyn DataTransferSend>,
         action_mask: &dyn DndActionMask,
-        icon: Option<Icon>,
+        icon: Option<DragIcon>,
     ) -> Result<DataTransferId, RequestError> {
         let mut state = self.state.borrow_mut();
         let action_set = DndActionSet::from_dyn(action_mask);
@@ -821,7 +820,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
         let mut pool = state.image_pool.lock().unwrap();
         let icon_surface = icon.and_then(|icon| {
-            let rgba = icon.cast_ref::<RgbaIcon>()?;
+            let rgba = icon.icon.cast_ref::<RgbaIcon>()?;
 
             let width = rgba.width().try_into().ok()?;
             let height = rgba.height().try_into().ok()?;
@@ -830,7 +829,8 @@ impl RootActiveEventLoop for ActiveEventLoop {
                 image_to_buffer(width, height, rgba.buffer(), Format::Argb8888, &mut pool).ok()?;
 
             let surface = state.compositor_state.create_surface(&self.queue_handle);
-            surface.attach(Some(buffer.wl_buffer()), 0, 0);
+            buffer.attach_to(&surface).ok()?;
+            surface.offset(icon.offset.x, icon.offset.y);
 
             Some(surface)
         });
@@ -852,6 +852,12 @@ impl RootActiveEventLoop for ActiveEventLoop {
         std::mem::drop(pool);
         std::mem::drop(source_window_state);
         std::mem::drop(windows);
+
+        // For some reason, if we commit before starting the drag then the offset isn't applied.
+        // This doesn't seem to be documented anywhere, and it's possible that it's a bug in KDE.
+        if let Some(surface) = &icon_surface {
+            surface.commit();
+        }
 
         state.dnd_state.set_send_drag(DragSource::new(
             transfer_id,

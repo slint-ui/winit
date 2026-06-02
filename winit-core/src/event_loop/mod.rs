@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use dpi::PhysicalPosition;
 use rwh_06::{DisplayHandle, HandleError, HasDisplayHandle};
 
 use crate::Instant;
@@ -184,7 +185,7 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
         source: WindowId,
         send_data: Box<dyn DataTransferSend>,
         action_mask: &dyn DndActionMask,
-        icon: Option<Icon>,
+        icon: Option<DragIcon>,
     ) -> Result<DataTransferId, RequestError> {
         let _ = source;
         let _ = send_data;
@@ -221,7 +222,19 @@ impl HasDisplayHandle for dyn ActiveEventLoop + '_ {
 impl_dyn_casting!(ActiveEventLoop);
 
 /// Information needed to initiate a new drag operation.
-pub struct StartDrag {}
+pub struct DragIcon {
+    /// The icon to apply to the cursor.
+    pub icon: Icon,
+    /// An offset applied to the dragged icon. 0,0 means that the top-left point
+    /// of the icon will be at the cursor.
+    pub offset: PhysicalPosition<i32>,
+}
+
+impl From<Icon> for DragIcon {
+    fn from(value: Icon) -> Self {
+        Self { icon: value, offset: Default::default() }
+    }
+}
 
 /// A mask of valid actions for a drag and drop operation.
 ///

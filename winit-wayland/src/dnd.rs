@@ -464,18 +464,18 @@ impl DataTransfer for DataOffer {
 /// transfer operation, along with the data that the source represents
 #[derive(Debug)]
 pub struct DragSource {
-    data_transfer_id: DataTransferId,
+    _data_transfer_id: DataTransferId,
     /// The `WlDataSource` generated from `data`.
     ///
     /// This is stored internally, as if this source is dropped then the
     /// drag operation will be cancelled. If this is `None`, then this is
     /// a purely-internal data source that will not be transferred to
     /// external applications.
-    data_source: Option<SctkDragSource>,
+    _data_source: Option<SctkDragSource>,
     /// The supplied [`DataTransferSend`].
     data: Box<dyn DataTransferSend>,
     /// (Optionally) an icon for the drag-and-drop operation.
-    icon: Option<WlSurface>,
+    _icon: Option<WlSurface>,
 }
 
 impl DragSource {
@@ -485,26 +485,12 @@ impl DragSource {
         data: Box<dyn DataTransferSend>,
         icon: Option<WlSurface>,
     ) -> Self {
-        Self { data_transfer_id, data_source, data, icon }
-    }
-
-    pub fn transfer_id(&self) -> DataTransferId {
-        self.data_transfer_id
-    }
-
-    /// The underlying externally-visible `WlDataSource`, or `None` if this operation is purely internal.
-    pub fn wl_data_source(&self) -> Option<&SctkDragSource> {
-        self.data_source.as_ref()
+        Self { _data_transfer_id: data_transfer_id, _data_source: data_source, data, _icon: icon }
     }
 
     /// Per-type data to be sent. See [`DataTransferSend`].
     pub fn data(&self) -> &dyn DataTransferSend {
         &*self.data
-    }
-
-    /// If `Some`, a surface to be displayed while dragging. If `None`, no icon can be displayed.
-    pub fn icon(&self) -> Option<&WlSurface> {
-        self.icon.as_ref()
     }
 }
 

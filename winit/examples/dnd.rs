@@ -2,11 +2,12 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use dpi::PhysicalPosition;
 use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::data_transfer::{DataTransferId, DataTransferSendBuilder, TypeHint, TypedData};
 use winit::event::{MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, DndActions, EventLoop};
+use winit::event_loop::{ActiveEventLoop, DndActions, DragIcon, EventLoop};
 use winit::icon::{Icon, RgbaIcon};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -30,7 +31,7 @@ struct Application {
     window: Option<Box<dyn Window>>,
     last_dnd_fetch: Option<Box<dyn TypedData>>,
     last_drag_start: Option<DataTransferId>,
-    drag_icon: Icon,
+    drag_icon: (Icon, PhysicalPosition<i32>),
 }
 
 const DRAG_IMAGE: &[u8] = include_bytes!("data/icon.png");
@@ -43,14 +44,17 @@ impl Application {
     }
 }
 
-fn load_icon(bytes: &[u8]) -> Icon {
+fn load_icon(bytes: &[u8]) -> (Icon, PhysicalPosition<i32>) {
     let (icon_rgba, icon_width, icon_height) = {
         let image = image::load_from_memory(bytes).unwrap().into_rgba8();
         let (width, height) = image.dimensions();
         let rgba = image.into_raw();
         (rgba, width, height)
     };
-    RgbaIcon::new(icon_rgba, icon_width, icon_height).expect("Failed to open icon").into()
+    (
+        RgbaIcon::new(icon_rgba, icon_width, icon_height).expect("Failed to open icon").into(),
+        PhysicalPosition { x: -(icon_width as i32) / 2, y: -(icon_height as i32) / 2 },
+    )
 }
 
 impl ApplicationHandler for Application {
@@ -77,12 +81,14 @@ impl ApplicationHandler for Application {
                         let _ = event_loop.cancel_drag(last_drag);
                     }
 
+                    let (icon, offset) = self.drag_icon.clone();
+
                     let result = event_loop.start_drag(
                         window_id,
                         DataTransferSendBuilder::new(())
                             .with_type(TypeHint::Plaintext, |()| "Winit example".to_string().into())
                             .with_type(TypeHint::Html, |()| {
-                                format!("<strong>Winit</strong> example").into()
+                                "<strong>Winit</strong> example".to_string().into()
                             })
                             .with_type(TypeHint::Image { extension_hint: Some("png") }, |()| {
                                 DRAG_IMAGE.to_vec().into()
@@ -98,10 +104,10 @@ impl ApplicationHandler for Application {
                             })
                             .build(),
                         &DndActions::All,
-                        Some(self.drag_icon.clone()),
+                        Some(DragIcon { icon, offset }),
                     );
 
-                    self.last_drag_start = dbg!(result).ok();
+                    self.last_drag_start = result.ok();
                 }
             },
             WindowEvent::DragLeft { .. } => {
