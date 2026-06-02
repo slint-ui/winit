@@ -36,6 +36,8 @@ objc2-app-kit = { workspace = true, features = [
     "NSControl",
     "NSCursor",
     "NSDragging",
+    "NSDraggingItem",
+    "NSDraggingSession",
     "NSEvent",
     "NSGraphics",
     "NSGraphicsContext",

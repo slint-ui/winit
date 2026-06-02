@@ -1,3 +1,4 @@
+use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -7,7 +8,7 @@ use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, available};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDidFinishLaunchingNotification,
-    NSApplicationWillTerminateNotification, NSWindow,
+    NSApplicationWillTerminateNotification, NSView, NSWindow,
 };
 use objc2_core_foundation::{CFIndex, CFRunLoopActivity, kCFRunLoopCommonModes};
 use objc2_foundation::{NSNotificationCenter, NSObjectProtocol};
@@ -17,16 +18,17 @@ use winit_common::core_foundation::{MainRunLoop, MainRunLoopObserver, tracing_ob
 use winit_common::foundation::create_observer;
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{CustomCursor as CoreCustomCursor, CustomCursorSource};
-use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypedData};
+use winit_core::data_transfer::{
+    DataTransfer, DataTransferId, DataTransferSend, TransferType, TypedData,
+};
 use winit_core::error::{EventLoopError, RequestError};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask,
+    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask, DragIcon,
     EventLoopProxy as CoreEventLoopProxy, OwnedDisplayHandle as CoreOwnedDisplayHandle,
-    UnknownDataTransfer,
 };
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
-use winit_core::window::Theme;
+use winit_core::window::{Theme, WindowId};
 
 use super::app::override_send_event;
 use super::app_state::AppState;
@@ -155,13 +157,13 @@ impl RootActiveEventLoop for ActiveEventLoop {
         &self,
         id: DataTransferId,
         actions: &dyn DndActionMask,
-    ) -> Result<(), UnknownDataTransfer> {
+    ) -> Result<(), RequestError> {
         let Some(drag_state) = self.app_state.drag_state().get() else {
-            return Err(UnknownDataTransfer(id));
+            return Err(os_error!(UnknownDataTransfer(id)).into());
         };
 
         if drag_state.id != id {
-            return Err(UnknownDataTransfer(id));
+            return Err(os_error!(UnknownDataTransfer(id)).into());
         }
         let new_drag_state = DragState { id, valid_operations: DragOperation::from_dyn(actions) };
 
@@ -169,7 +171,45 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
         Ok(())
     }
+
+    fn start_drag(
+        &self,
+        source: WindowId,
+        _send_data: Box<dyn DataTransferSend>,
+        _action_mask: &dyn DndActionMask,
+        _icon: Option<DragIcon>,
+    ) -> Result<DataTransferId, RequestError> {
+        self.app_state
+            .with_window_delegate_on_main(source, |delegate| {
+                #[expect(unreachable_code)]
+                delegate
+                    .view()
+                    .downcast::<NSView>()
+                    .ok()
+                    .unwrap()
+                    .beginDraggingSessionWithItems_event_source(todo!(), todo!(), todo!());
+            })
+            .ok_or(RequestError::Ignored)
+    }
+
+    fn cancel_drag(&self, id: DataTransferId) -> Result<(), RequestError> {
+        let _ = id;
+        todo!()
+    }
 }
+
+/// An operation was attempted on a data transfer ID, but that ID was invalid.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct UnknownDataTransfer(pub DataTransferId);
+
+impl fmt::Display for UnknownDataTransfer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = self.0.into_raw();
+        write!(f, "Unknown data transfer with ID {id}")
+    }
+}
+
+impl std::error::Error for UnknownDataTransfer {}
 
 impl rwh_06::HasDisplayHandle for ActiveEventLoop {
     fn display_handle(&self) -> Result<rwh_06::DisplayHandle<'_>, rwh_06::HandleError> {

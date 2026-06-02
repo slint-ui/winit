@@ -868,6 +868,16 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
         Ok(transfer_id)
     }
+
+    fn cancel_drag(&self, id: DataTransferId) -> Result<(), RequestError> {
+        // Clearing the sent drag will drop the inner `WlDataSource`, which will
+        // cancel the drag operation.
+        if self.state.borrow_mut().dnd_state.clear_send_drag() {
+            Ok(())
+        } else {
+            Err(RequestError::Ignored)
+        }
+    }
 }
 
 /// An operation was attempted on a data transfer ID, but that ID was invalid.

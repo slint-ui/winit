@@ -620,8 +620,10 @@ impl DndState {
         self.send_drag = Some(source);
     }
 
-    pub(crate) fn clear_send_drag(&mut self) {
-        self.send_drag = None;
+    /// Returns `true` if a drag operation was in progress, `false` if no drag operation was in
+    /// progress.
+    pub(crate) fn clear_send_drag(&mut self) -> bool {
+        self.send_drag.take().is_some()
     }
 
     pub(crate) fn send_drag_data_mut(&mut self) -> Option<&mut dyn DataTransferSend> {

@@ -1,4 +1,5 @@
 use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::HashMap;
 use std::mem;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -6,6 +7,7 @@ use std::time::Instant;
 
 use dispatch2::MainThreadBound;
 use objc2::MainThreadMarker;
+use objc2::rc::{Retained, Weak};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSRunningApplication};
 use objc2_foundation::NSNotification;
 use winit_common::core_foundation::{EventLoopProxy, MainRunLoop};
@@ -20,6 +22,7 @@ use super::event_loop::{ActiveEventLoop, notify_windows_of_exit, stop_app_immedi
 use super::menu;
 use super::observer::EventLoopWaker;
 use crate::dnd::{DragOperation, Pasteboards};
+use crate::window_delegate::WindowDelegate;
 
 #[derive(Debug)]
 pub(super) struct AppState {
@@ -47,6 +50,7 @@ pub(super) struct AppState {
     start_time: Cell<Option<Instant>>,
     wait_timeout: Cell<Option<Instant>>,
     pending_redraw: RefCell<Vec<WindowId>>,
+    windows: RefCell<HashMap<WindowId, MainThreadBound<Weak<WindowDelegate>>>>,
     // NOTE: This is strongly referenced by our `NSWindowDelegate` and our `NSView` subclass, and
     // as such should be careful to not add fields that, in turn, strongly reference those.
 }
@@ -94,6 +98,7 @@ impl AppState {
             waker: RefCell::new(EventLoopWaker::new()),
             start_time: Cell::new(None),
             wait_timeout: Cell::new(None),
+            windows: Default::default(),
             pending_redraw: RefCell::new(vec![]),
         });
 
@@ -106,6 +111,22 @@ impl AppState {
             .get()
             .expect("tried to get application state before it was registered")
             .clone()
+    }
+
+    pub fn with_window_delegate_on_main<F, R>(&self, id: WindowId, func: F) -> Option<R>
+    where
+        F: FnOnce(Retained<WindowDelegate>) -> R + Send,
+        R: Send,
+    {
+        self.windows.borrow_mut().get(&id)?.get_on_main(move |delegate| {
+            if let Some(delegate) = delegate.load() { Some(func(delegate)) } else { None }
+        })
+    }
+
+    pub fn new_window(&self, window: &Retained<WindowDelegate>, mtm: MainThreadMarker) {
+        let id = window.id();
+        let window_downgraded = Weak::from_retained(window);
+        self.windows.borrow_mut().insert(id, MainThreadBound::new(window_downgraded, mtm));
     }
 
     // NOTE: This notification will, globally, only be emitted once,

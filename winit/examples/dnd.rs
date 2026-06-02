@@ -174,12 +174,15 @@ impl ApplicationHandler for Application {
                                     None => image::ImageReader::new(reader),
                                 };
 
-                                if let Ok(image) = reader.decode() {
-                                    let width = image.width();
-                                    let height = image.height();
-                                    info!("Received image ({width}x{height})");
-                                } else {
-                                    warn!("Failed to decode jpeg");
+                                match reader.decode() {
+                                    Ok(image) => {
+                                        let width = image.width();
+                                        let height = image.height();
+                                        info!("Received image ({width}x{height})");
+                                    },
+                                    Err(err) => {
+                                        warn!("Failed to decode image: {err}");
+                                    },
                                 }
                             }
                         },
