@@ -42,6 +42,7 @@ mod state;
 mod types;
 mod window;
 
+pub use self::dnd::{DataOffer, DndActionSet, DragSource, MimeData, MimeType};
 pub use self::event_loop::{ActiveEventLoop, EventLoop};
 pub use self::window::Window;
 

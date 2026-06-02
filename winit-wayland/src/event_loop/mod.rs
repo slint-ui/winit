@@ -2,37 +2,45 @@
 
 use std::cell::{Cell, RefCell};
 use std::io::Result as IOResult;
-use std::mem;
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use std::{fmt, mem};
 
 use calloop::ping::Ping;
 use dpi::LogicalSize;
 use rustix::event::{PollFd, PollFlags};
 use rustix::pipe::{self, PipeFlags};
 use sctk::data_device_manager::data_offer;
+use sctk::data_device_manager::data_source::DragSource as SctkDragSource;
 use sctk::reexports::calloop_wayland_source::WaylandSource;
 use sctk::reexports::client::{Connection, QueueHandle, globals};
+use sctk::shell::WaylandSurface;
 use tracing::warn;
+use wayland_client::Proxy;
+use wayland_client::protocol::wl_shm::Format;
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{CustomCursor as CoreCustomCursor, CustomCursorSource};
-use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypedData};
+use winit_core::data_transfer::{
+    DataTransfer, DataTransferId, DataTransferSend, TransferType, TypedData,
+};
 use winit_core::error::{EventLoopError, NotSupportedError, OsError, RequestError};
 use winit_core::event::{DeviceEvent, StartCause, SurfaceSizeWriter, WindowEvent};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
     ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask,
-    OwnedDisplayHandle as CoreOwnedDisplayHandle, UnknownDataTransfer,
+    OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
+use winit_core::icon::{Icon, RgbaIcon};
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
 use winit_core::window::Theme;
 
 use crate::dnd::{DndActionSet, MimeData};
 use crate::types::cursor::WaylandCustomCursor;
+use crate::{DragSource, MimeType, image_to_buffer};
 
 mod proxy;
 pub mod sink;
@@ -687,8 +695,8 @@ impl RootActiveEventLoop for ActiveEventLoop {
         id: DataTransferId,
         type_: &dyn TransferType,
     ) -> Result<Box<dyn TypedData>, RequestError> {
-        let mut state = self.state.borrow_mut();
-        let Some(current_drag) = state.dnd_state.current_drag() else {
+        let state = self.state.borrow();
+        let Some(current_drag) = state.dnd_state.receive_drag() else {
             return Err(RequestError::Ignored);
         };
 
@@ -712,14 +720,12 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
         let mime_type = mime_type.clone();
 
-        state.dnd_state.accept_type(mime_type.clone());
-
         Ok(Box::new(MimeData::new(readfd, mime_type)))
     }
 
     fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
         let state = self.state.borrow();
-        let Some(state) = state.dnd_state.current_drag() else {
+        let Some(state) = state.dnd_state.receive_drag() else {
             return Err(RequestError::Ignored);
         };
 
@@ -734,21 +740,134 @@ impl RootActiveEventLoop for ActiveEventLoop {
         &self,
         id: DataTransferId,
         mask: &dyn DndActionMask,
-    ) -> Result<(), UnknownDataTransfer> {
+    ) -> Result<(), RequestError> {
         let state = self.state.borrow();
-        let Some(state) = state.dnd_state.current_drag() else {
-            return Err(UnknownDataTransfer(id));
+        let Some(state) = state.dnd_state.receive_drag() else {
+            return Err(os_error!(UnknownDataTransfer(id)).into());
         };
 
         if state.transfer_id() != id {
-            return Err(UnknownDataTransfer(id));
+            return Err(os_error!(UnknownDataTransfer(id)).into());
         }
 
         state.set_actions(&DndActionSet::from_dyn(mask));
 
         Ok(())
     }
+
+    fn start_drag(
+        &self,
+        source: WindowId,
+        send_data: Box<dyn DataTransferSend>,
+        action_mask: &dyn DndActionMask,
+        icon: Option<Icon>,
+    ) -> Result<DataTransferId, RequestError> {
+        static DRAG_EVENT_SERIAL: AtomicU32 = AtomicU32::new(0);
+
+        let mut state = self.state.borrow_mut();
+        let action_set = DndActionSet::from_dyn(action_mask);
+
+        let data_device_manager = state
+            .data_device_manager_state
+            .as_ref()
+            .ok_or(NotSupportedError::new("Tried to initiate drag, but data device not enabled"))?;
+
+        let windows = state.windows.borrow();
+        let source_window_state = windows
+            .get(&source)
+            .ok_or(NotSupportedError::new(
+                "Tried to initiate drag, but source window ID was invalid",
+            ))?
+            .lock()
+            .unwrap();
+        let source_surface = source_window_state.window.wl_surface();
+        let data_device = state
+            .seats
+            .get(&source_surface.id())
+            .ok_or(NotSupportedError::new(
+                "Tried to initiate drag, but source window ID was invalid",
+            ))?
+            .data_device()
+            .ok_or(NotSupportedError::new(
+                "Tried to initiate drag, but source window does not have the pointer capability",
+            ))?;
+
+        let data_source = if send_data.is_internal_only() {
+            None
+        } else {
+            let mut mime_types = Vec::new();
+            send_data.for_each_available_type(&mut |ty_| {
+                if let Some(mime) = MimeType::from_dyn(ty_) {
+                    mime_types.push(mime);
+                }
+
+                std::ops::ControlFlow::Continue(())
+            });
+
+            Some(data_device_manager.create_drag_and_drop_source(
+                &self.queue_handle,
+                mime_types,
+                action_set.dnd_actions,
+            ))
+        };
+
+        let mut pool = state.image_pool.lock().unwrap();
+        let icon_surface = icon.and_then(|icon| {
+            let rgba = icon.cast_ref::<RgbaIcon>()?;
+
+            let width = rgba.width().try_into().ok()?;
+            let height = rgba.height().try_into().ok()?;
+
+            let buffer =
+                image_to_buffer(width, height, rgba.buffer(), Format::Argb8888, &mut pool).ok()?;
+
+            let surface = state.compositor_state.create_surface(&self.queue_handle);
+            surface.attach(Some(buffer.wl_buffer()), 0, 0);
+
+            Some(surface)
+        });
+
+        let serial = DRAG_EVENT_SERIAL.fetch_add(1, Ordering::Relaxed);
+
+        match &data_source {
+            Some(source) => {
+                source.start_drag(data_device, source_surface, icon_surface.as_ref(), serial)
+            },
+            None => SctkDragSource::start_internal_drag(
+                data_device,
+                source_surface,
+                icon_surface.as_ref(),
+                serial,
+            ),
+        }
+
+        std::mem::drop(pool);
+        std::mem::drop(source_window_state);
+        std::mem::drop(windows);
+
+        state.dnd_state.set_send_drag(DragSource::new(
+            data_source,
+            send_data,
+            action_set,
+            icon_surface,
+        ));
+
+        todo!()
+    }
 }
+
+/// An operation was attempted on a data transfer ID, but that ID was invalid.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct UnknownDataTransfer(pub DataTransferId);
+
+impl fmt::Display for UnknownDataTransfer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = self.0.into_raw();
+        write!(f, "Unknown data transfer with ID {id}")
+    }
+}
+
+impl std::error::Error for UnknownDataTransfer {}
 
 impl ActiveEventLoop {
     fn clear_exit(&self) {

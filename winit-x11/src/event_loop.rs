@@ -26,7 +26,7 @@ use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
     ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask,
     EventLoopProxy as CoreEventLoopProxy, EventLoopProxyProvider,
-    OwnedDisplayHandle as CoreOwnedDisplayHandle, UnknownDataTransfer,
+    OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
 use winit_core::window::{Theme, Window as CoreWindow, WindowAttributes, WindowId};
@@ -37,7 +37,10 @@ use x11rb::protocol::{xkb, xproto};
 use x11rb::x11_utils::X11Error as LogicalError;
 use x11rb::xcb_ffi::ReplyOrIdError;
 
-use crate::atoms::*;
+use crate::atoms::{
+    _NET_WM_PING, _NET_WM_SYNC_REQUEST, ABS_PRESSURE, ABS_TILT_X, ABS_TILT_Y, ABS_X, ABS_Y, Atoms,
+    WM_DELETE_WINDOW,
+};
 use crate::dnd::{DeadlockSentinelGuard, Dnd, SelectionFetchState};
 use crate::event_processor::{EventProcessor, MAX_MOD_REPLAY_LEN};
 use crate::ime::{self, Ime, ImeCreationError, ImeSender};
@@ -837,15 +840,15 @@ impl RootActiveEventLoop for ActiveEventLoop {
         &self,
         id: DataTransferId,
         actions: &dyn DndActionMask,
-    ) -> Result<(), UnknownDataTransfer> {
+    ) -> Result<(), RequestError> {
         let mut dnd = self.dnd.borrow_mut();
 
         let Some(state) = &mut dnd.state else {
-            return Err(UnknownDataTransfer(id));
+            return Err(os_error!(UnknownDataTransfer(id)).into());
         };
 
         if state.transfer_id != id {
-            return Err(UnknownDataTransfer(id));
+            return Err(os_error!(UnknownDataTransfer(id)).into());
         }
 
         state.accepted = actions.hint().any();
@@ -859,6 +862,19 @@ impl rwh_06::HasDisplayHandle for ActiveEventLoop {
         self.xconn.display_handle()
     }
 }
+
+/// An operation was attempted on a data transfer ID, but that ID was invalid.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct UnknownDataTransfer(pub DataTransferId);
+
+impl fmt::Display for UnknownDataTransfer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = self.0.into_raw();
+        write!(f, "Unknown data transfer with ID {id}")
+    }
+}
+
+impl std::error::Error for UnknownDataTransfer {}
 
 pub(crate) struct DeviceInfo<'a> {
     xconn: &'a XConnection,

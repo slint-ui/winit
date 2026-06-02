@@ -43,9 +43,12 @@
 //! implementing the traits in this module, which can then be accessed in an application
 //! using the methods defined on [`dyn AsAny`]. See each platform's documentation for details.
 
+#![warn(missing_docs)]
+
 use std::ffi::OsString;
 use std::fmt;
 use std::io;
+use std::marker::PhantomData;
 use std::ops::ControlFlow;
 
 use crate::as_any::AsAny;
@@ -244,23 +247,85 @@ pub trait DataTransfer: AsAny + fmt::Debug {
 
 impl_dyn_casting!(DataTransfer);
 
+/// Kinds of data that can be sent via a `DataTransfer`.
+///
+/// Some kinds of data cannot be represented by just a binary blob in a cross-platform way.
+/// File URIs on Windows and macOS are represented as arrays of strings, and strings have
+/// different encoding on different platforms. To allow this to be represented, we allow
+/// supplying strings and URIs separately from binary blobs.
 pub enum SendData {
+    /// File URIs
     Uris(Vec<OsString>),
+    /// String
     String(String),
+    /// Binary blob
     Bytes(Vec<u8>),
 }
 
-pub trait NewDataTransfer: DataTransfer {
-    fn make_type(&self, type_: &dyn TransferType) -> Option<SendData>;
+impl From<String> for SendData {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
 }
 
-#[derive(Default)]
-pub struct NewDataTransferBuilder<T> {
+impl From<Vec<u8>> for SendData {
+    fn from(value: Vec<u8>) -> Self {
+        Self::Bytes(value)
+    }
+}
+
+// We monomorphize these `From` implementations instead of making them generic, in order to
+// prevent accidentally casting to the wrong type.
+impl From<Vec<OsString>> for SendData {
+    fn from(value: Vec<OsString>) -> Self {
+        Self::Uris(value)
+    }
+}
+
+/// Trait for sending data via a data transfer.
+///
+/// See [`StartDrag`](crate::event_loop::StartDrag) for where this is used. To build an
+/// implementation of this trait dynamically in a cross-platform way, use [`DataTransferSendBuilder`].
+pub trait DataTransferSend: DataTransfer {
+    /// Get the data for the specified type, or `None` if this value does not supply the given data type.
+    fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData>;
+
+    /// If `true`, this data transfer is only valid for the application sending the data.
+    ///
+    /// This is useful on Wayland and macOS, which allow expressing internal drag-and-drop in the API.
+    /// On platforms which make no distinction between internal and external drag-and-drop, this is
+    /// ignored.
+    fn is_internal_only(&self) -> bool;
+}
+
+impl_dyn_casting!(DataTransferSend);
+
+/// Marker for a [`DataTransferSendBuilder`] which is internal-only.
+pub enum InternalTransferMarker {}
+/// Marker for a [`DataTransferSendBuilder`] which is external.
+pub enum ExternalTransferMarker {}
+
+type SendDataCallback<T> = Box<dyn Fn(&T) -> SendData>;
+
+/// Dynamic builder for an implementation of [`DataTransferSend`].
+///
+/// On all platforms, inter-application data transfer (i.e. clipboard and drag-and-drop) works like so:
+///
+/// - The source advertises a set of types that it can transfer.
+/// - The destination picks one or more of those types to receive.
+/// - The source sends the data for that type.
+///
+/// This type abstracts that in a way that allows data to be sent cross-platform. `T` is an optional
+/// state value, which allows the user to have a single source of truth for their data, converting
+/// it lazily to the requested type.
+pub struct DataTransferSendBuilder<T, M = ExternalTransferMarker> {
     state: T,
-    types: Vec<(Box<dyn TransferType>, Box<dyn Fn(&T) -> Option<SendData>>)>,
+    types: Vec<(Box<dyn TransferType>, SendDataCallback<T>)>,
+    ///
+    _is_internal: PhantomData<M>,
 }
 
-impl<T> fmt::Debug for NewDataTransferBuilder<T>
+impl<T, M> fmt::Debug for DataTransferSendBuilder<T, M>
 where
     T: fmt::Debug,
 {
@@ -269,8 +334,9 @@ where
     }
 }
 
-impl<T> DataTransfer for NewDataTransferBuilder<T>
+impl<T, M> DataTransfer for DataTransferSendBuilder<T, M>
 where
+    M: 'static,
     T: fmt::Debug + 'static,
 {
     fn for_each_available_type<'this>(
@@ -281,46 +347,88 @@ where
     }
 }
 
-impl<T> NewDataTransfer for NewDataTransferBuilder<T>
+impl<T> DataTransferSend for DataTransferSendBuilder<T, ExternalTransferMarker>
 where
     T: fmt::Debug + 'static,
 {
-    fn make_type(&self, type_: &dyn TransferType) -> Option<SendData> {
-        let (_, func) = self.types.iter().find(|(ty, _)| ty.matches(type_))?;
+    fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData> {
+        self.data_for_type(type_)
+    }
 
-        func(&self.state)
+    fn is_internal_only(&self) -> bool {
+        false
     }
 }
 
-impl<T> NewDataTransferBuilder<T> {
-    pub fn new(state: T) -> Self {
-        Self { state, types: vec![] }
+impl<T> DataTransferSend for DataTransferSendBuilder<T, InternalTransferMarker>
+where
+    T: fmt::Debug + 'static,
+{
+    fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData> {
+        self.data_for_type(type_)
     }
 
+    fn is_internal_only(&self) -> bool {
+        true
+    }
+}
+
+impl<T> DataTransferSendBuilder<T, ExternalTransferMarker> {
+    /// Create a new [`DataTransferSendBuilder`], with a state value which acts as
+    /// the single source of truth for the underlying data.
+    pub fn new(state: T) -> Self {
+        Self { state, types: vec![], _is_internal: PhantomData }
+    }
+}
+
+impl<T> DataTransferSendBuilder<T, InternalTransferMarker> {
+    /// Create a new [`DataTransferSendBuilder`], with a state value which acts as
+    /// the single source of truth for the underlying data.
+    pub fn new_internal(state: T) -> Self {
+        Self { state, types: vec![], _is_internal: PhantomData }
+    }
+}
+
+impl<T, M> DataTransferSendBuilder<T, M> {
+    fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData> {
+        let (_, func) = self.types.iter().find(|(ty, _)| ty.matches(type_))?;
+
+        Some(func(&self.state))
+    }
+
+    /// Add a callback which converts the builder's state to the given type. In
+    /// most cases, `type_` will be [`TypeHint`].
     pub fn add_type<Ty, F>(&mut self, type_: Ty, func: F) -> &mut Self
     where
         Ty: TransferType,
-        F: Fn(&T) -> Option<SendData> + 'static,
+        F: Fn(&T) -> SendData + 'static,
     {
         self.types.push((Box::new(type_), Box::new(func)));
         self
     }
 
+    /// Return a new builder, adding a callback which converts the builder's state
+    /// to the given type. In most cases, `type_` will be [`TypeHint`].
     pub fn with_type<Ty, F>(mut self, type_: Ty, func: F) -> Self
     where
         Ty: TransferType,
-        F: Fn(&T) -> Option<SendData> + 'static,
+        F: Fn(&T) -> SendData + 'static,
     {
         self.add_type(type_, func);
         self
     }
 }
 
-impl<T> NewDataTransferBuilder<T>
+impl<T, M> DataTransferSendBuilder<T, M>
 where
     T: fmt::Debug + 'static,
+    Self: DataTransferSend,
 {
-    pub fn build(self) -> Box<dyn NewDataTransfer> {
+    /// Consume the builder, returning an implementation of [`DataTransferSend`].
+    ///
+    /// Note that this is only provided for explicitness and ergonomics. [`DataTransferSendBuilder`]
+    /// implements [`DataTransferSend`] and this method is equivalent to [`Box::new`].
+    pub fn build(self) -> Box<dyn DataTransferSend> {
         Box::new(self)
     }
 }

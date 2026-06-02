@@ -1,21 +1,29 @@
+//! Types related to drag-and-drop and data transfer on Wayland.
+
+#![warn(missing_docs)]
+
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::Deref;
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
 use dpi::{LogicalPosition, PhysicalPosition};
+use sctk::data_device_manager::WritePipe;
 use sctk::data_device_manager::data_device::{DataDeviceData, DataDeviceHandler};
 use sctk::data_device_manager::data_offer::{DataOfferHandler, DragOffer};
-use sctk::data_device_manager::data_source::DataSourceHandler;
+use sctk::data_device_manager::data_source::{DataSourceHandler, DragSource as SctkDragSource};
 use wayland_client::protocol::wl_data_device::WlDataDevice;
 use wayland_client::protocol::wl_data_device_manager::DndAction;
 use wayland_client::protocol::wl_data_offer::WlDataOffer;
+use wayland_client::protocol::wl_data_source::WlDataSource;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Proxy, QueueHandle};
-use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypeHint, TypedData};
+use winit_core::data_transfer::{
+    DataTransfer, DataTransferId, DataTransferSend, SendData, TransferType, TypeHint, TypedData,
+};
 use winit_core::event::WindowEvent;
 use winit_core::event_loop::{DndActionMask, DndActions};
 use winit_core::window::WindowId;
@@ -27,42 +35,85 @@ impl DataSourceHandler for WinitState {
         &mut self,
         conn: &Connection,
         qh: &QueueHandle<Self>,
-        source: &wayland_client::protocol::wl_data_source::WlDataSource,
+        source: &WlDataSource,
         mime: Option<String>,
     ) {
         let _ = mime;
         let _ = source;
         let _ = qh;
         let _ = conn;
-        // Not implemented, but required for `DataDeviceHandler`.
+        // This is unnecessary.
     }
 
     fn send_request(
         &mut self,
-        conn: &Connection,
-        qh: &QueueHandle<Self>,
-        source: &wayland_client::protocol::wl_data_source::WlDataSource,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlDataSource,
         mime: String,
-        fd: sctk::data_device_manager::WritePipe,
+        mut fd: WritePipe,
     ) {
-        let _ = fd;
-        let _ = mime;
-        let _ = source;
-        let _ = qh;
-        let _ = conn;
-        // Not implemented, but required for `DataDeviceHandler`.
+        let Some(data) = self.dnd_state.send_drag_data() else {
+            // TODO: Is there a way to explicitly express that the data was not sent?
+            return;
+        };
+
+        let mime = MimeType::parse(mime);
+
+        let Some(send_data) = data.data_for_type(&mime) else {
+            return;
+        };
+
+        match send_data {
+            SendData::Uris(os_strings) => {
+                let mut iter = os_strings.into_iter();
+                let Some(first) = iter.next() else {
+                    return;
+                };
+
+                if fd.write_all(first.as_encoded_bytes()).is_err() {
+                    return;
+                }
+
+                // TODO: Is there something better we can do than unconditionally encoding as `text/uri-list`?
+                for os_str in iter {
+                    // TODO: Is `as_encoded_bytes` correct here?
+                    if fd
+                        .write_all(b"\n")
+                        .and_then(|()| fd.write_all(os_str.as_encoded_bytes()))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            },
+            SendData::String(str) => match mime.charset().unwrap_or(Charset::Utf16) {
+                Charset::Utf8 => {
+                    if fd.write_all(str.as_bytes()).is_err() {
+                        return;
+                    }
+                },
+                Charset::Utf16 => {
+                    let utf16_binary = str
+                        .encode_utf16()
+                        .flat_map(|uint16| uint16.to_le_bytes())
+                        .collect::<Vec<_>>();
+                    if fd.write_all(&utf16_binary).is_err() {
+                        return;
+                    }
+                },
+            },
+            SendData::Bytes(binary) => {
+                if fd.write_all(&binary).is_err() {
+                    return;
+                }
+            },
+        }
     }
 
-    fn cancelled(
-        &mut self,
-        conn: &Connection,
-        qh: &QueueHandle<Self>,
-        source: &wayland_client::protocol::wl_data_source::WlDataSource,
-    ) {
-        let _ = source;
-        let _ = qh;
-        let _ = conn;
-        // Not implemented, but required for `DataDeviceHandler`.
+    // TODO: Send `DragCancel` event.
+    fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {
+        self.dnd_state.clear_send_drag();
     }
 
     fn dnd_dropped(
@@ -74,7 +125,7 @@ impl DataSourceHandler for WinitState {
         let _ = source;
         let _ = qh;
         let _ = conn;
-        // Not implemented, but required for `DataDeviceHandler`.
+        // TODO: Send message to window.
     }
 
     fn dnd_finished(
@@ -86,21 +137,22 @@ impl DataSourceHandler for WinitState {
         let _ = source;
         let _ = qh;
         let _ = conn;
-        // Not implemented, but required for `DataDeviceHandler`.
+        // TODO: Send message to window.
+        self.dnd_state.clear_send_drag();
     }
 
     fn action(
         &mut self,
         conn: &Connection,
         qh: &QueueHandle<Self>,
-        source: &wayland_client::protocol::wl_data_source::WlDataSource,
-        action: wayland_client::protocol::wl_data_device_manager::DndAction,
+        source: &WlDataSource,
+        action: DndAction,
     ) {
         let _ = action;
         let _ = source;
         let _ = qh;
         let _ = conn;
-        // Not implemented, but required for `DataDeviceHandler`.
+        // TODO: Send message to window
     }
 }
 
@@ -110,6 +162,7 @@ enum Charset {
     Utf16,
 }
 
+/// MIME type as string, with an optional hint detected from the MIME type.
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct MimeType {
     mime: Arc<str>,
@@ -155,11 +208,11 @@ impl MimeType {
         // Files
         (TEXT_URI_LIST, TypeHint::UriList),
         // Plaintext
-        (TEXT_PLAIN, TypeHint::Plaintext),
         (TEXT_PLAIN_CHARSET_UTF8, TypeHint::Plaintext),
+        (TEXT_PLAIN, TypeHint::Plaintext),
         // HTML
-        (TEXT_HTML, TypeHint::Html),
         (TEXT_HTML_CHARSET_UTF8, TypeHint::Html),
+        (TEXT_HTML, TypeHint::Html),
         // RTF
         (APPLICATION_RTF, TypeHint::Rtf),
         // Audio
@@ -186,6 +239,17 @@ impl MimeType {
         (IMAGE_X_ICON, TypeHint::Image { extension_hint: Some("ico") }),
     ];
 
+    pub(crate) fn from_dyn(type_: &dyn TransferType) -> Option<Self> {
+        type_.cast_ref::<Self>().cloned().or_else(|| {
+            let hint = type_.hint()?;
+            Self::MIME_HINT_MAP
+                .iter()
+                .find_map(|(mime, haystack)| (*haystack == hint).then_some(mime))
+                .map(|mime| Self { mime: mime.to_string().into(), hint: Some(hint) })
+        })
+    }
+
+    // TODO: We should properly parse MIME types using `mime` or a similar crate.
     fn charset(&self) -> Option<Charset> {
         let (_essence, options) = self.mime.split_once(';')?;
 
@@ -261,6 +325,7 @@ impl TransferType for MimeType {
     }
 }
 
+/// In-progress typed data transfer from another application.
 #[derive(Debug)]
 pub struct MimeData {
     mime_type: MimeType,
@@ -340,16 +405,17 @@ impl TypedData for MimeData {
     }
 }
 
+/// A
 #[derive(Debug, Clone)]
-pub struct CurrentDrag {
+pub struct DataOffer {
     mime_types: Arc<[MimeType]>,
-    accepted_type: Option<MimeType>,
+    // TODO: Internal drag-and-drop.
     data: WlDataOffer,
     transfer_id: DataTransferId,
     window_id: WindowId,
 }
 
-impl CurrentDrag {
+impl DataOffer {
     pub(crate) fn transfer_id(&self) -> DataTransferId {
         self.transfer_id
     }
@@ -375,7 +441,7 @@ impl CurrentDrag {
     }
 }
 
-impl Deref for CurrentDrag {
+impl Deref for DataOffer {
     type Target = WlDataOffer;
 
     fn deref(&self) -> &Self::Target {
@@ -383,7 +449,7 @@ impl Deref for CurrentDrag {
     }
 }
 
-impl DataTransfer for CurrentDrag {
+impl DataTransfer for DataOffer {
     fn for_each_available_type<'this>(
         &'this self,
         func: &'_ mut dyn FnMut(&'this dyn TransferType) -> std::ops::ControlFlow<()>,
@@ -392,17 +458,76 @@ impl DataTransfer for CurrentDrag {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct DndState {
-    current_drag: Option<CurrentDrag>,
+/// Wrapper for [`WlDataSource`], which exposes the types that are advertised by a data
+/// transfer operation, along with the data that the source represents
+#[derive(Debug)]
+pub struct DragSource {
+    /// The `WlDataSource` generated from `data`.
+    ///
+    /// This is stored internally, as if this source is dropped then the
+    /// drag operation will be cancelled. If this is `None`, then this is
+    /// a purely-internal data source that will not be transferred to
+    /// external applications.
+    data_source: Option<SctkDragSource>,
+    /// The supplied [`DataTransferSend`].
+    data: Box<dyn DataTransferSend>,
+    /// The set of available actions.
+    action_set: DndActionSet,
+    /// (Optionally) an icon for the drag-and-drop operation.
+    icon: Option<WlSurface>,
 }
 
+impl DragSource {
+    pub(crate) fn new(
+        data_source: Option<SctkDragSource>,
+        data: Box<dyn DataTransferSend>,
+        action_set: DndActionSet,
+        icon: Option<WlSurface>,
+    ) -> Self {
+        Self { data_source, action_set, data, icon }
+    }
+
+    /// The underlying externally-visible `WlDataSource`, or `None` if this operation is purely internal.
+    pub fn wl_data_source(&self) -> Option<&SctkDragSource> {
+        self.data_source.as_ref()
+    }
+
+    /// Per-type data to be sent. See [`DataTransferSend`].
+    pub fn data(&self) -> &dyn DataTransferSend {
+        &*self.data
+    }
+
+    /// If `Some`, a surface to be displayed while dragging. If `None`, no icon can be displayed.
+    pub fn icon(&self) -> Option<&WlSurface> {
+        self.icon.as_ref()
+    }
+}
+
+/// The current state of an in-progress drag-and-drop operation.
+#[derive(Debug, Default)]
+pub struct DndState {
+    receive_drag: Option<DataOffer>,
+    send_drag: Option<DragSource>,
+}
+
+/// The set of actions supported on a drag operation.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct DndActionSet {
     /// The set of available actions.
     pub dnd_actions: DndAction,
-    /// If set, the preferred action.
-    preferred_action: Option<DndAction>,
+    /// If supplied, the preferred action. If `None`, will be
+    /// determined from `dnd_actions`. In order of preference:
+    ///
+    /// - [`DndAction::Move`]
+    /// - [`DndAction::Copy`]
+    /// - [`DndAction::Ask`]
+    pub preferred_action: Option<DndAction>,
+}
+
+impl From<DndAction> for DndActionSet {
+    fn from(value: DndAction) -> Self {
+        Self { dnd_actions: value, preferred_action: None }
+    }
 }
 
 fn guess_preferred_action(action: DndAction) -> DndAction {
@@ -413,6 +538,7 @@ fn guess_preferred_action(action: DndAction) -> DndAction {
 }
 
 impl DndActionSet {
+    /// A new, empty `DndActionSet`.
     pub fn empty() -> Self {
         Self { dnd_actions: DndAction::empty(), preferred_action: None }
     }
@@ -421,10 +547,16 @@ impl DndActionSet {
         mask.cast_ref::<Self>().copied().unwrap_or_else(|| mask.hint().into())
     }
 
+    /// Get the preferred action, or guess it from `dnd_actions`. In order of preference:
+    ///
+    /// - [`DndAction::Move`]
+    /// - [`DndAction::Copy`]
+    /// - [`DndAction::Ask`]
     pub fn preferred_action(&self) -> DndAction {
         self.preferred_action.unwrap_or_else(|| guess_preferred_action(self.dnd_actions))
     }
 
+    /// Get the intersection of this action set with another action set.
     pub fn intersection(&self, other: &Self) -> Self {
         let preferred_action = match (self.preferred_action, other.preferred_action) {
             (Some(this_pref), Some(other_pref)) if this_pref.intersects(other_pref) => {
@@ -477,14 +609,20 @@ impl From<DndActions> for DndActionSet {
 }
 
 impl DndState {
-    pub(crate) fn current_drag(&self) -> Option<&CurrentDrag> {
-        self.current_drag.as_ref()
+    pub(crate) fn receive_drag(&self) -> Option<&DataOffer> {
+        self.receive_drag.as_ref()
     }
 
-    pub(crate) fn accept_type(&mut self, mime_type: MimeType) {
-        if let Some(cur) = self.current_drag.as_mut() {
-            cur.accepted_type = Some(mime_type);
-        }
+    pub(crate) fn set_send_drag(&mut self, source: DragSource) {
+        self.send_drag = Some(source);
+    }
+
+    pub(crate) fn clear_send_drag(&mut self) {
+        self.send_drag = None;
+    }
+
+    pub(crate) fn send_drag_data(&self) -> Option<&dyn DataTransferSend> {
+        self.send_drag.as_ref().map(|send| send.data())
     }
 }
 
@@ -538,7 +676,7 @@ impl DataDeviceHandler for WinitState {
 
         let window_id = crate::make_wid(wl_surface);
 
-        let current_drag = drag.with_mime_types(|types| CurrentDrag {
+        let current_drag = drag.with_mime_types(|types| DataOffer {
             mime_types: types
                 .iter()
                 .map(|str| MimeType::parse(str.clone()))
@@ -546,13 +684,12 @@ impl DataDeviceHandler for WinitState {
                 .into(),
             transfer_id: DataTransferId::from_raw(drag.serial as i64),
             data: drag.inner().clone(),
-            accepted_type: None,
             window_id,
         });
 
         current_drag.set_actions(&DndActionSet::empty());
 
-        self.dnd_state.current_drag = Some(current_drag);
+        self.dnd_state.receive_drag = Some(current_drag);
 
         let scale_factor = self
             .windows
@@ -576,13 +713,13 @@ impl DataDeviceHandler for WinitState {
             return;
         };
 
-        if let Some(current_drag) = self.dnd_state.current_drag() {
+        if let Some(current_drag) = self.dnd_state.receive_drag() {
             self.events_sink.push_window_event(
                 WindowEvent::DragLeft { id: current_drag.transfer_id() },
                 current_drag.window_id(),
             );
 
-            self.dnd_state.current_drag = None;
+            self.dnd_state.receive_drag = None;
         }
 
         if let Some(drag) = data.drag_offer() {
@@ -653,7 +790,7 @@ impl DataDeviceHandler for WinitState {
             window_id,
         );
 
-        self.dnd_state.current_drag = None;
+        self.dnd_state.receive_drag = None;
     }
 }
 

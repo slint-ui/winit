@@ -14,24 +14,12 @@ use crate::Instant;
 use crate::as_any::AsAny;
 use crate::cursor::{CustomCursor, CustomCursorSource};
 use crate::data_transfer::{
-    DataTransfer, DataTransferId, NewDataTransfer, TransferType, TypedData,
+    DataTransfer, DataTransferId, DataTransferSend, TransferType, TypedData,
 };
 use crate::error::{NotSupportedError, RequestError};
+use crate::icon::Icon;
 use crate::monitor::MonitorHandle;
-use crate::window::{Theme, Window, WindowAttributes};
-
-/// An operation was attempted on a data transfer ID, but that ID was invalid.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct UnknownDataTransfer(pub DataTransferId);
-
-impl fmt::Display for UnknownDataTransfer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let id = self.0.into_raw();
-        write!(f, "Unknown data transfer with ID {id}")
-    }
-}
-
-impl std::error::Error for UnknownDataTransfer {}
+use crate::window::{Theme, Window, WindowAttributes, WindowId};
 
 pub trait ActiveEventLoop: AsAny + fmt::Debug {
     /// Creates an [`EventLoopProxy`] that can be used to dispatch user events
@@ -142,8 +130,7 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
         let _ = id;
         let _ = type_;
         Err(RequestError::NotSupported(NotSupportedError::new(
-            "Cross-application data transfer (e.g. drag-and-drop, clipboard) is unsupported on \
-             this platform",
+            DATA_TRANSFER_UNSUPPORTED_ERROR_MESSAGE,
         )))
     }
 
@@ -154,8 +141,7 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
     fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
         let _ = id;
         Err(RequestError::NotSupported(NotSupportedError::new(
-            "Cross-application data transfer (e.g. drag-and-drop, clipboard) is unsupported on \
-             this platform",
+            DATA_TRANSFER_UNSUPPORTED_ERROR_MESSAGE,
         )))
     }
 
@@ -168,22 +154,63 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
         &self,
         id: DataTransferId,
         actions: &dyn DndActionMask,
-    ) -> Result<(), UnknownDataTransfer> {
+    ) -> Result<(), RequestError> {
+        let _ = id;
         let _ = actions;
-        Err(UnknownDataTransfer(id))
+        Err(RequestError::NotSupported(NotSupportedError::new(
+            DATA_TRANSFER_UNSUPPORTED_ERROR_MESSAGE,
+        )))
     }
 
+    /// Initiate a new drag-and-drop operation.
+    ///
+    /// See [`DataTransferSendBuilder`](crate::data_transfer::DataTransferSend) for how to create a
+    /// new cross-platform data transfer, or see the platform-specific implementation of
+    /// [`DataTransferSend`].
+    ///
+    /// ### Arguments
+    ///
+    /// - `send_data` - The data provided by this drag operation. See
+    ///   [`DataTransferSendBuilder`](crate::data_transfer::DataTransferSendBuilder).
+    /// - `action_mask` - The set of valid actions for this drag operation. See
+    ///   [`DndActions`](crate::data_transfer::DndActions).
+    /// - `icon` -  icon to show while dragging.
+    ///
+    /// Some platforms have a more-expressive way of setting the visual component of a drag operation. For
+    /// those platforms, consider using the platform-specific implementation of [`DataTransferSend`] for
+    /// `send_data` and set this field to `None`.
     fn start_drag(
         &self,
-        data_transfer: Box<dyn NewDataTransfer>,
+        source: WindowId,
+        send_data: Box<dyn DataTransferSend>,
+        action_mask: &dyn DndActionMask,
+        icon: Option<Icon>,
     ) -> Result<DataTransferId, RequestError> {
-        let _ = data_transfer;
+        let _ = source;
+        let _ = send_data;
+        let _ = action_mask;
+        let _ = icon;
         Err(RequestError::NotSupported(NotSupportedError::new(
-            "Cross-application data transfer (e.g. drag-and-drop, clipboard) is unsupported on \
-             this platform",
+            DATA_TRANSFER_UNSUPPORTED_ERROR_MESSAGE,
+        )))
+    }
+
+    /// Cancel a drag-and-drop operation.
+    ///
+    /// This can be called on data transfers initiated by this application, as well as data transfers
+    /// received from an external application.
+    fn cancel_drag(&self, id: DataTransferId) -> Result<(), RequestError> {
+        let _ = id;
+        Err(RequestError::NotSupported(NotSupportedError::new(
+            DATA_TRANSFER_UNSUPPORTED_ERROR_MESSAGE,
         )))
     }
 }
+
+const DATA_TRANSFER_UNSUPPORTED_ERROR_MESSAGE: &str = {
+    "Cross-application data transfer (e.g. drag-and-drop, clipboard) is unsupported on \
+    this platform"
+};
 
 impl HasDisplayHandle for dyn ActiveEventLoop + '_ {
     fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
@@ -193,16 +220,44 @@ impl HasDisplayHandle for dyn ActiveEventLoop + '_ {
 
 impl_dyn_casting!(ActiveEventLoop);
 
-// Inspired by https://developer.mozilla.org/en-US/docs/Web/API/DataTransfer/dropEffect
+/// Information needed to initiate a new drag operation.
+pub struct StartDrag {}
+
+/// A mask of valid actions for a drag and drop operation.
+///
+/// Inspired by [the `dropEffect` DOM API](https://developer.mozilla.org/en-US/docs/Web/API/DataTransfer/dropEffect).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DndActions {
     /// A specific set of operations.
-    Flags { move_: bool, copy: bool, link: bool },
+    ///
+    /// This is limited to the same set of cross-platform actions supported by `dropEffect`.
+    Flags {
+        /// Move the dragged item from the source to the destination.
+        move_: bool,
+        /// Copy the dragged item from the source to the destination.
+        copy: bool,
+        /// A link is established between the source and the destination.
+        link: bool,
+    },
     /// All actions, including platform-specific ones not represented in `Self::Flags`.
+    ///
+    /// Most commonly used as a default mask, in case the user just wants to support everything.
     All,
 }
 
 impl DndActions {
+    pub const fn new_copy() -> Self {
+        Self::Flags { move_: false, copy: true, link: false }
+    }
+
+    pub const fn new_move() -> Self {
+        Self::Flags { move_: true, copy: false, link: false }
+    }
+
+    pub const fn new_link() -> Self {
+        Self::Flags { move_: false, copy: false, link: true }
+    }
+
     pub const fn copy(&self) -> bool {
         match *self {
             DndActions::Flags { copy, .. } => copy,

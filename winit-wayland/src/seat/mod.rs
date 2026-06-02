@@ -78,6 +78,10 @@ impl WinitSeatState {
     pub fn new() -> Self {
         Default::default()
     }
+
+    pub(crate) fn data_device(&self) -> Option<&DataDevice> {
+        self.data_device.as_ref()
+    }
 }
 
 impl SeatHandler for WinitState {
