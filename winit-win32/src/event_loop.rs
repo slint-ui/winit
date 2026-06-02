@@ -73,7 +73,7 @@ use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
     ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask,
     EventLoopProxy as RootEventLoopProxy, EventLoopProxyProvider,
-    OwnedDisplayHandle as CoreOwnedDisplayHandle, UnknownDataTransfer,
+    OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
 use winit_core::keyboard::ModifiersState;
 use winit_core::monitor::{Fullscreen, MonitorHandle as CoreMonitorHandle};
@@ -505,10 +505,10 @@ impl RootActiveEventLoop for ActiveEventLoop {
         &self,
         id: DataTransferId,
         actions: &dyn DndActionMask,
-    ) -> Result<(), UnknownDataTransfer> {
+    ) -> Result<(), RequestError> {
         let mut state = self.0.drag_state.borrow_mut();
         let Some(state) = state.as_mut().filter(|s| s.id == id) else {
-            return Err(UnknownDataTransfer(id));
+            return Err(os_error!(UnknownDataTransfer(id)).into());
         };
         state.actions = actions.hint();
         Ok(())
@@ -521,6 +521,19 @@ impl rwh_06::HasDisplayHandle for ActiveEventLoop {
         unsafe { Ok(rwh_06::DisplayHandle::borrow_raw(raw)) }
     }
 }
+
+/// An operation was attempted on a data transfer ID, but that ID was invalid.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct UnknownDataTransfer(pub DataTransferId);
+
+impl fmt::Display for UnknownDataTransfer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = self.0.into_raw();
+        write!(f, "Unknown data transfer with ID {id}")
+    }
+}
+
+impl std::error::Error for UnknownDataTransfer {}
 
 #[derive(Clone)]
 pub(crate) struct OwnedDisplayHandle;
