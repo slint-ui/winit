@@ -37,7 +37,7 @@ pub struct IDataObjectVtbl {
         pformatetc: *const FORMATETC,
         pmedium: *mut STGMEDIUM,
     ) -> HRESULT,
-    QueryGetData:
+    pub QueryGetData:
         unsafe extern "system" fn(This: *mut IDataObject, pformatetc: *const FORMATETC) -> HRESULT,
     pub GetCanonicalFormatEtc: unsafe extern "system" fn(
         This: *mut IDataObject,
@@ -67,6 +67,36 @@ pub struct IDataObjectVtbl {
         This: *mut IDataObject,
         ppenumAdvise: *const *const IEnumSTATDATA,
     ) -> HRESULT,
+}
+
+#[repr(C)]
+pub struct IEnumFORMATETCVtbl {
+    pub parent: IUnknownVtbl,
+    pub Next: unsafe extern "system" fn(
+        This: *mut IEnumFORMATETC,
+        celt: u32,
+        rgelt: *mut FORMATETC,
+        pceltFetched: *mut u32,
+    ) -> HRESULT,
+    pub Skip: unsafe extern "system" fn(This: *mut IEnumFORMATETC, celt: u32) -> HRESULT,
+    pub Reset: unsafe extern "system" fn(This: *mut IEnumFORMATETC) -> HRESULT,
+    pub Clone: unsafe extern "system" fn(
+        This: *mut IEnumFORMATETC,
+        ppenum: *mut *mut IEnumFORMATETC,
+    ) -> HRESULT,
+}
+
+pub type IDropSource = *mut c_void;
+
+#[repr(C)]
+pub struct IDropSourceVtbl {
+    pub parent: IUnknownVtbl,
+    pub QueryContinueDrag: unsafe extern "system" fn(
+        This: *mut IDropSource,
+        fEscapePressed: BOOL,
+        grfKeyState: u32,
+    ) -> HRESULT,
+    pub GiveFeedback: unsafe extern "system" fn(This: *mut IDropSource, dwEffect: u32) -> HRESULT,
 }
 
 #[repr(C)]
@@ -129,6 +159,35 @@ pub struct ITaskbarList2Vtbl {
 pub struct ITaskbarList2 {
     pub lpVtbl: *const ITaskbarList2Vtbl,
 }
+
+// Well-known COM IIDs. Values from `unknwn.h`, `objidl.h`, `oleidl.h`.
+pub const IID_IUnknown: GUID = GUID {
+    data1: 0x00000000,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+
+pub const IID_IDataObject: GUID = GUID {
+    data1: 0x0000010e,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+
+pub const IID_IDropSource: GUID = GUID {
+    data1: 0x00000121,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+
+pub const IID_IEnumFORMATETC: GUID = GUID {
+    data1: 0x00000103,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
 
 pub const CLSID_TaskbarList: GUID = GUID {
     data1: 0x56fdf344,

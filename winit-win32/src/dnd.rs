@@ -1,29 +1,43 @@
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{OsString, c_void};
 use std::io;
 use std::ops::ControlFlow;
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
 use dpi::PhysicalPosition;
-use windows_sys::Win32::Foundation::{E_ABORT, E_FAIL, HGLOBAL, HWND, POINT, POINTL, S_OK};
+use windows_sys::Win32::Foundation::{
+    DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, DV_E_FORMATETC, E_ABORT,
+    E_FAIL, E_NOINTERFACE, E_NOTIMPL, E_UNEXPECTED, GlobalFree, HGLOBAL, HWND,
+    OLE_E_ADVISENOTSUPPORTED, POINT, POINTL, S_FALSE, S_OK,
+};
 use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
 use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL};
 use windows_sys::Win32::System::DataExchange::RegisterClipboardFormatW;
-use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+use windows_sys::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
 use windows_sys::Win32::System::Ole::{
     CF_HDROP, CF_UNICODETEXT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
     ReleaseStgMedium,
 };
-use windows_sys::Win32::UI::Shell::{DragQueryFileW, HDROP};
-use windows_sys::core::{GUID, HRESULT};
-use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypeHint, TypedData};
+use windows_sys::Win32::System::SystemServices::{
+    MK_LBUTTON, MK_MBUTTON, MK_RBUTTON, MK_XBUTTON1, MK_XBUTTON2,
+};
+use windows_sys::Win32::UI::Shell::{DROPFILES, DragQueryFileW, HDROP};
+use windows_sys::core::{BOOL, GUID, HRESULT};
+use winit_core::data_transfer::{
+    DataTransfer, DataTransferId, DataTransferSend, SendData, TransferType, TypeHint, TypedData,
+};
 use winit_core::event::WindowEvent;
 use winit_core::event_loop::DndActions;
 
 use crate::definitions::{
-    IDataObject, IDataObjectVtbl, IDropTarget, IDropTargetVtbl, IUnknown, IUnknownVtbl,
+    IDataObject, IDataObjectVtbl, IDropSource, IDropSourceVtbl, IDropTarget, IDropTargetVtbl,
+    IEnumFORMATETC, IEnumFORMATETCVtbl, IID_IDataObject, IID_IDropSource, IID_IEnumFORMATETC,
+    IID_IUnknown, IUnknown, IUnknownVtbl,
 };
 use crate::event_loop::EventLoopRunner;
 use crate::util;
@@ -321,15 +335,19 @@ impl FileDropHandler {
         pt: POINTL,
         pdwEffect: *mut u32,
     ) -> HRESULT {
-        static DATA_TRANSFER_ID: AtomicI64 = AtomicI64::new(0);
-
         let drop_handler = unsafe { Self::from_interface(this) };
-        let data_transfer_id =
-            DataTransferId::from_raw(DATA_TRANSFER_ID.fetch_add(1, Ordering::Relaxed));
+        // If this is a self-drop (we initiated the drag from this process), reuse the source's id
+        // and seed actions from the mask declared at `start_drag` - the app's `DragEntered`
+        // handler can't call `set_valid_actions` in time because it's buffered until `DoDragDrop`
+        // returns.
+        let (data_transfer_id, initial_actions) = match drop_handler.runner.source_drag.get() {
+            Some(info) => (info.id, info.allowed_actions),
+            None => (next_data_transfer_id(), DndActions::none()),
+        };
         drop_handler.active_data_transfer_id = Some(data_transfer_id);
 
         let data = Rc::new(unsafe { DataObject::from_idataobject(pDataObj) });
-        drop_handler.runner.register_data_transfer(data_transfer_id, data);
+        drop_handler.runner.register_data_transfer(data_transfer_id, data, initial_actions);
 
         let mut pt = POINT { x: pt.x, y: pt.y };
         unsafe {
@@ -421,9 +439,14 @@ impl FileDropHandler {
             *pdwEffect = pick_effect(actions, grfKeyState, source_allowed);
         }
 
-        // The application has had a chance to read the data while handling `DragDropped`; the
-        // transfer's lifecycle ends here.
-        drop_handler.runner.remove_data_transfer(data_transfer_id);
+        // External drop: the app's `DragDropped` handler dispatched synchronously above and has
+        // already read the data; safe to release the cache. Self-drop: the handler is buffered
+        // and hasn't run yet, so defer cleanup until after `dispatch_buffered_events` drains.
+        if drop_handler.runner.source_drag.get().is_some() {
+            drop_handler.runner.defer_source_drag_cleanup(data_transfer_id);
+        } else {
+            drop_handler.runner.remove_data_transfer(data_transfer_id);
+        }
 
         S_OK
     }
@@ -453,21 +476,27 @@ static DROP_TARGET_VTBL: IDropTargetVtbl = IDropTargetVtbl {
     Drop: FileDropHandler::Drop,
 };
 
+/// Map the app's [`DndActions`] to the win32 `DROPEFFECT_*` bitmask.
+pub(crate) fn actions_to_dropeffect_mask(actions: DndActions) -> u32 {
+    let mut mask = 0u32;
+    if actions.copy() {
+        mask |= DROPEFFECT_COPY;
+    }
+    if actions.move_() {
+        mask |= DROPEFFECT_MOVE;
+    }
+    if actions.link() {
+        mask |= DROPEFFECT_LINK;
+    }
+    mask
+}
+
 // Intersect the app's valid actions with the source's allowed effects, honoring Ctrl/Shift.
 fn pick_effect(actions: DndActions, key_state: u32, source_allowed: u32) -> u32 {
     const MK_SHIFT: u32 = 0x0004;
     const MK_CONTROL: u32 = 0x0008;
 
-    let mut allowed = 0u32;
-    if actions.copy() && (source_allowed & DROPEFFECT_COPY) != 0 {
-        allowed |= DROPEFFECT_COPY;
-    }
-    if actions.move_() && (source_allowed & DROPEFFECT_MOVE) != 0 {
-        allowed |= DROPEFFECT_MOVE;
-    }
-    if actions.link() && (source_allowed & DROPEFFECT_LINK) != 0 {
-        allowed |= DROPEFFECT_LINK;
-    }
+    let allowed = actions_to_dropeffect_mask(actions) & source_allowed;
     if allowed == 0 {
         return DROPEFFECT_NONE;
     }
@@ -490,5 +519,707 @@ fn pick_effect(actions: DndActions, key_state: u32, source_allowed: u32) -> u32 
         DROPEFFECT_MOVE
     } else {
         DROPEFFECT_LINK
+    }
+}
+
+// ============================================================================
+// Source side: providing data and controlling a `DoDragDrop` session.
+// ============================================================================
+
+/// Mint a unique [`DataTransferId`] for either a target-side `DragEnter` or a source-side
+/// `start_drag` so the two never collide.
+pub(crate) fn next_data_transfer_id() -> DataTransferId {
+    static COUNTER: AtomicI64 = AtomicI64::new(0);
+    DataTransferId::from_raw(COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+fn guids_eq(a: &GUID, b: &GUID) -> bool {
+    a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
+}
+
+fn register_clipboard_format(name: &str) -> Option<u16> {
+    let wide = util::encode_wide(name);
+    let atom = unsafe { RegisterClipboardFormatW(wide.as_ptr()) };
+    (atom != 0).then_some(atom as u16)
+}
+
+// Returns the (cf_format, specialised hint) pairs we can lower `hint` to.
+//
+// Most hints map 1:1. Wildcard hints like `Image { extension_hint: None }` -
+// the cross-platform way to say "any image format" - fan out to one entry per
+// concrete format we support, each paired with the specialised hint so
+// `data_for_type` is invoked with a concrete extension instead of `None`.
+fn cf_formats_for_hint(hint: TypeHint) -> Vec<(u16, TypeHint)> {
+    fn one(cf: Option<u16>, hint: TypeHint) -> Vec<(u16, TypeHint)> {
+        cf.map(|cf| vec![(cf, hint)]).unwrap_or_default()
+    }
+    match hint {
+        TypeHint::Plaintext => vec![(CF_UNICODETEXT, hint)],
+        TypeHint::UriList => vec![(CF_HDROP, hint)],
+        TypeHint::Html => one(register_clipboard_format("HTML Format"), hint),
+        TypeHint::Image { extension_hint: Some("png") } => {
+            one(register_clipboard_format("PNG"), hint)
+        },
+        TypeHint::Image { extension_hint: None } => {
+            // Fan out to every concrete image format we can produce.
+            let mut out = Vec::new();
+            if let Some(cf) = register_clipboard_format("PNG") {
+                out.push((cf, TypeHint::Image { extension_hint: Some("png") }));
+            }
+            out
+        },
+        _ => Vec::new(),
+    }
+}
+
+unsafe fn alloc_hglobal_from(src: *const u8, len: usize) -> Option<HGLOBAL> {
+    let hglobal = unsafe { GlobalAlloc(GMEM_MOVEABLE, len) };
+    if hglobal.is_null() {
+        return None;
+    }
+    let dst = unsafe { GlobalLock(hglobal) };
+    if dst.is_null() {
+        // `GlobalAlloc` succeeded but locking failed - free before bailing so we don't
+        // leak the moveable handle.
+        unsafe { GlobalFree(hglobal) };
+        return None;
+    }
+    unsafe { std::ptr::copy_nonoverlapping(src, dst as *mut u8, len) };
+    unsafe { GlobalUnlock(hglobal) };
+    Some(hglobal)
+}
+
+/// Build the [HTML Clipboard Format] wire bytes from an app-supplied HTML string.
+///
+/// The format is a UTF-8 buffer with a small text header naming byte offsets into itself. Each
+/// offset placeholder is exactly 10 zero-padded decimal digits, which fixes the header at a
+/// known constant length and removes the chicken-and-egg between header length and offsets.
+///
+/// If the input already contains `<!--StartFragment-->` we trust the caller's wrapping;
+/// otherwise we wrap it in a minimal `<html><body>` document with fragment markers.
+///
+/// [HTML Clipboard Format]: https://learn.microsoft.com/en-us/windows/win32/dataxchg/html-clipboard-format
+fn build_html_clipboard_format(html: &str) -> Vec<u8> {
+    use std::borrow::Cow;
+
+    const START_MARKER: &str = "<!--StartFragment-->";
+    const END_MARKER: &str = "<!--EndFragment-->";
+
+    let body: Cow<'_, str> = if html.contains(START_MARKER) {
+        Cow::Borrowed(html)
+    } else {
+        Cow::Owned(format!("<html><body>\r\n{START_MARKER}{html}{END_MARKER}\r\n</body></html>"))
+    };
+
+    const HEADER_LEN: usize = concat!(
+        "Version:0.9\r\n",
+        "StartHTML:0000000000\r\n",
+        "EndHTML:0000000000\r\n",
+        "StartFragment:0000000000\r\n",
+        "EndFragment:0000000000\r\n",
+    )
+    .len();
+
+    let start_html = HEADER_LEN;
+    let end_html = HEADER_LEN + body.len();
+    let start_fragment = HEADER_LEN + body.find(START_MARKER).unwrap() + START_MARKER.len();
+    let end_fragment = HEADER_LEN + body.find(END_MARKER).unwrap();
+
+    let header = format!(
+        "Version:0.9\r\nStartHTML:{start_html:010}\r\nEndHTML:{end_html:010}\r\nStartFragment:\
+         {start_fragment:010}\r\nEndFragment:{end_fragment:010}\r\n",
+    );
+    debug_assert_eq!(header.len(), HEADER_LEN);
+
+    let mut buf = Vec::with_capacity(header.len() + body.len());
+    buf.extend_from_slice(header.as_bytes());
+    buf.extend_from_slice(body.as_bytes());
+    buf
+}
+
+/// Convert app-supplied [`SendData`] into an `HGLOBAL`-backed [`STGMEDIUM`].
+///
+/// Callers must have already validated that the `SendData` variant matches the on-the-wire shape
+/// the requested clipboard format expects (see `variant_matches_hint` at the `GetData` call site).
+unsafe fn send_data_to_stgmedium(data: SendData, hint: TypeHint) -> Option<STGMEDIUM> {
+    let hglobal = match data {
+        SendData::String(s) if matches!(hint, TypeHint::Html) => {
+            // HTML Clipboard Format: UTF-8 with a Version/StartHTML/EndHTML/StartFragment/
+            // EndFragment header. Targets parse the header before reading the wrapped HTML.
+            let bytes = build_html_clipboard_format(&s);
+            unsafe { alloc_hglobal_from(bytes.as_ptr(), bytes.len()) }?
+        },
+        SendData::String(s) => {
+            // UTF-16 + NUL - used for `CF_UNICODETEXT` and other text-ish registered formats.
+            let utf16 = util::encode_wide(&s);
+            unsafe { alloc_hglobal_from(utf16.as_ptr() as *const u8, utf16.len() * 2) }?
+        },
+        SendData::Uris(paths) => {
+            // CF_HDROP: `DROPFILES` header + double-NUL-terminated UTF-16 path list.
+            let mut wide: Vec<u16> = Vec::new();
+            for path in &paths {
+                wide.extend(path.encode_wide());
+                wide.push(0);
+            }
+            wide.push(0);
+            let header = DROPFILES {
+                pFiles: std::mem::size_of::<DROPFILES>() as u32,
+                pt: POINT { x: 0, y: 0 },
+                fNC: 0,
+                fWide: 1,
+            };
+            let total = std::mem::size_of::<DROPFILES>() + wide.len() * 2;
+            let hglobal = unsafe { GlobalAlloc(GMEM_MOVEABLE, total) };
+            if hglobal.is_null() {
+                return None;
+            }
+            let dst = unsafe { GlobalLock(hglobal) };
+            if dst.is_null() {
+                unsafe { GlobalFree(hglobal) };
+                return None;
+            }
+            unsafe {
+                std::ptr::write_unaligned(dst as *mut DROPFILES, header);
+                let paths_dst = (dst as *mut u8).add(std::mem::size_of::<DROPFILES>());
+                std::ptr::copy_nonoverlapping(
+                    wide.as_ptr() as *const u8,
+                    paths_dst,
+                    wide.len() * 2,
+                );
+                GlobalUnlock(hglobal);
+            }
+            hglobal
+        },
+        SendData::Bytes(b) => unsafe { alloc_hglobal_from(b.as_ptr(), b.len()) }?,
+    };
+
+    let mut medium = unsafe { std::mem::zeroed::<STGMEDIUM>() };
+    medium.tymed = TYMED_HGLOBAL as u32;
+    medium.u.hGlobal = hglobal;
+    Some(medium)
+}
+
+/// True if the `SendData` variant carries the on-the-wire shape OLE expects for `hint`'s mapped
+/// clipboard format. Mismatches (e.g. `SendData::String` for a `UriList` hint) would otherwise
+/// produce malformed `HGLOBAL` payloads (e.g. UTF-16 text mislabeled as `CF_HDROP`), which the
+/// target would parse as wild offsets - memory corruption in the receiving process.
+fn variant_matches_hint(hint: TypeHint, data: &SendData) -> bool {
+    matches!(
+        (hint, data),
+        (TypeHint::UriList, SendData::Uris(_))
+            | (TypeHint::Plaintext | TypeHint::Html | TypeHint::Rtf, SendData::String(_))
+            | (TypeHint::Image { .. } | TypeHint::Audio { .. }, SendData::Bytes(_))
+    )
+}
+
+// ---- IEnumFORMATETC: a cursor over a precomputed `Vec<FORMATETC>`. -----------
+
+#[repr(C)]
+#[allow(non_snake_case)]
+struct IEnumFORMATETCInterface {
+    lpVtbl: *const IEnumFORMATETCVtbl,
+}
+
+#[repr(C)]
+struct SourceFormatEnumerator {
+    interface: IEnumFORMATETCInterface,
+    refcount: AtomicUsize,
+    formats: Vec<FORMATETC>,
+    cursor: Cell<usize>,
+}
+
+#[allow(non_snake_case)]
+impl SourceFormatEnumerator {
+    fn new_boxed(formats: Vec<FORMATETC>) -> *mut Self {
+        Box::into_raw(Box::new(Self {
+            interface: IEnumFORMATETCInterface {
+                lpVtbl: &SOURCE_ENUM_FORMATETC_VTBL as *const IEnumFORMATETCVtbl,
+            },
+            refcount: AtomicUsize::new(1),
+            formats,
+            cursor: Cell::new(0),
+        }))
+    }
+
+    unsafe fn from_interface<'a, I>(this: *mut I) -> &'a mut SourceFormatEnumerator {
+        unsafe { &mut *(this as *mut _) }
+    }
+
+    unsafe extern "system" fn QueryInterface(
+        this: *mut IUnknown,
+        riid: *const GUID,
+        ppv: *mut *mut c_void,
+    ) -> HRESULT {
+        let riid = unsafe { &*riid };
+        if guids_eq(riid, &IID_IUnknown) || guids_eq(riid, &IID_IEnumFORMATETC) {
+            unsafe { *ppv = this as *mut c_void };
+            unsafe { Self::AddRef(this) };
+            S_OK
+        } else {
+            unsafe { *ppv = std::ptr::null_mut() };
+            E_NOINTERFACE
+        }
+    }
+
+    unsafe extern "system" fn AddRef(this: *mut IUnknown) -> u32 {
+        let me = unsafe { Self::from_interface(this) };
+        me.refcount.fetch_add(1, Ordering::Release) as u32 + 1
+    }
+
+    unsafe extern "system" fn Release(this: *mut IUnknown) -> u32 {
+        let me = unsafe { Self::from_interface(this) };
+        let count = me.refcount.fetch_sub(1, Ordering::Release) - 1;
+        if count == 0 {
+            drop(unsafe { Box::from_raw(me as *mut Self) });
+        }
+        count as u32
+    }
+
+    unsafe extern "system" fn Next(
+        this: *mut IEnumFORMATETC,
+        celt: u32,
+        rgelt: *mut FORMATETC,
+        pcelt_fetched: *mut u32,
+    ) -> HRESULT {
+        let me = unsafe { Self::from_interface(this) };
+        let cursor = me.cursor.get();
+        let to_copy = (celt as usize).min(me.formats.len().saturating_sub(cursor));
+        for i in 0..to_copy {
+            unsafe { *rgelt.add(i) = me.formats[cursor + i] };
+        }
+        me.cursor.set(cursor + to_copy);
+        if !pcelt_fetched.is_null() {
+            unsafe { *pcelt_fetched = to_copy as u32 };
+        }
+        if to_copy < celt as usize { S_FALSE } else { S_OK }
+    }
+
+    unsafe extern "system" fn Skip(this: *mut IEnumFORMATETC, celt: u32) -> HRESULT {
+        let me = unsafe { Self::from_interface(this) };
+        let new_cursor = me.cursor.get().saturating_add(celt as usize);
+        if new_cursor > me.formats.len() {
+            me.cursor.set(me.formats.len());
+            S_FALSE
+        } else {
+            me.cursor.set(new_cursor);
+            S_OK
+        }
+    }
+
+    unsafe extern "system" fn Reset(this: *mut IEnumFORMATETC) -> HRESULT {
+        let me = unsafe { Self::from_interface(this) };
+        me.cursor.set(0);
+        S_OK
+    }
+
+    unsafe extern "system" fn Clone(
+        this: *mut IEnumFORMATETC,
+        ppenum: *mut *mut IEnumFORMATETC,
+    ) -> HRESULT {
+        let me = unsafe { Self::from_interface(this) };
+        let cloned = SourceFormatEnumerator::new_boxed(me.formats.clone());
+        unsafe { (*cloned).cursor.set(me.cursor.get()) };
+        unsafe { *ppenum = cloned as *mut IEnumFORMATETC };
+        S_OK
+    }
+}
+
+static SOURCE_ENUM_FORMATETC_VTBL: IEnumFORMATETCVtbl = IEnumFORMATETCVtbl {
+    parent: IUnknownVtbl {
+        QueryInterface: SourceFormatEnumerator::QueryInterface,
+        AddRef: SourceFormatEnumerator::AddRef,
+        Release: SourceFormatEnumerator::Release,
+    },
+    Next: SourceFormatEnumerator::Next,
+    Skip: SourceFormatEnumerator::Skip,
+    Reset: SourceFormatEnumerator::Reset,
+    Clone: SourceFormatEnumerator::Clone,
+};
+
+// ---- IDataObject (source) ---------------------------------------------------
+
+#[repr(C)]
+#[allow(non_snake_case)]
+struct IDataObjectInterface {
+    lpVtbl: *const IDataObjectVtbl,
+}
+
+#[repr(C)]
+struct SourceDataObjectData {
+    interface: IDataObjectInterface,
+    refcount: AtomicUsize,
+    send_data: RefCell<Box<dyn DataTransferSend>>,
+    // (cf_format, hint) pairs we advertise to the target.
+    formats: Vec<(u16, TypeHint)>,
+}
+
+#[allow(non_snake_case)]
+impl SourceDataObjectData {
+    fn new_boxed(send_data: Box<dyn DataTransferSend>) -> *mut Self {
+        let mut formats: Vec<(u16, TypeHint)> = Vec::new();
+        send_data.for_each_available_type(&mut |ty| {
+            if let Some(hint) = ty.hint() {
+                for (cf, specialised) in cf_formats_for_hint(hint) {
+                    if !formats.iter().any(|(c, _)| *c == cf) {
+                        formats.push((cf, specialised));
+                    }
+                }
+            }
+            ControlFlow::Continue(())
+        });
+
+        Box::into_raw(Box::new(Self {
+            interface: IDataObjectInterface {
+                lpVtbl: &SOURCE_DATA_OBJECT_VTBL as *const IDataObjectVtbl,
+            },
+            refcount: AtomicUsize::new(1),
+            send_data: RefCell::new(send_data),
+            formats,
+        }))
+    }
+
+    unsafe fn from_interface<'a, I>(this: *mut I) -> &'a mut SourceDataObjectData {
+        unsafe { &mut *(this as *mut _) }
+    }
+
+    unsafe extern "system" fn QueryInterface(
+        this: *mut IUnknown,
+        riid: *const GUID,
+        ppv: *mut *mut c_void,
+    ) -> HRESULT {
+        let riid = unsafe { &*riid };
+        if guids_eq(riid, &IID_IUnknown) || guids_eq(riid, &IID_IDataObject) {
+            unsafe { *ppv = this as *mut c_void };
+            unsafe { Self::AddRef(this) };
+            S_OK
+        } else {
+            unsafe { *ppv = std::ptr::null_mut() };
+            E_NOINTERFACE
+        }
+    }
+
+    unsafe extern "system" fn AddRef(this: *mut IUnknown) -> u32 {
+        let me = unsafe { Self::from_interface(this) };
+        me.refcount.fetch_add(1, Ordering::Release) as u32 + 1
+    }
+
+    unsafe extern "system" fn Release(this: *mut IUnknown) -> u32 {
+        let me = unsafe { Self::from_interface(this) };
+        let count = me.refcount.fetch_sub(1, Ordering::Release) - 1;
+        if count == 0 {
+            drop(unsafe { Box::from_raw(me as *mut Self) });
+        }
+        count as u32
+    }
+
+    unsafe extern "system" fn GetData(
+        this: *mut IDataObject,
+        pformatetc_in: *const FORMATETC,
+        pmedium: *mut STGMEDIUM,
+    ) -> HRESULT {
+        let me = unsafe { Self::from_interface(this) };
+        let format = unsafe { &*pformatetc_in };
+        if (format.tymed & TYMED_HGLOBAL as u32) == 0 {
+            return DV_E_FORMATETC;
+        }
+        let Some(&(_, hint)) = me.formats.iter().find(|&&(cf, _)| cf == format.cfFormat) else {
+            return DV_E_FORMATETC;
+        };
+        // `try_borrow_mut` rather than `borrow_mut`: `data_for_type` is the app's callback and
+        // may itself reach back into this `IDataObject`. A panic across the `extern "system"`
+        // boundary would be UB; return `E_UNEXPECTED` instead.
+        let data = {
+            let Ok(send_data) = me.send_data.try_borrow_mut() else {
+                return E_UNEXPECTED;
+            };
+            send_data.data_for_type(&hint)
+        };
+        let Some(data) = data else {
+            return DV_E_FORMATETC;
+        };
+        if !variant_matches_hint(hint, &data) {
+            return DV_E_FORMATETC;
+        }
+        let Some(medium) = (unsafe { send_data_to_stgmedium(data, hint) }) else {
+            return E_FAIL;
+        };
+        unsafe { *pmedium = medium };
+        S_OK
+    }
+
+    unsafe extern "system" fn GetDataHere(
+        _this: *mut IDataObject,
+        _pformatetc: *const FORMATETC,
+        _pmedium: *mut STGMEDIUM,
+    ) -> HRESULT {
+        E_NOTIMPL
+    }
+
+    unsafe extern "system" fn QueryGetData(
+        this: *mut IDataObject,
+        pformatetc: *const FORMATETC,
+    ) -> HRESULT {
+        let me = unsafe { Self::from_interface(this) };
+        let format = unsafe { &*pformatetc };
+        if (format.tymed & TYMED_HGLOBAL as u32) == 0 {
+            return DV_E_FORMATETC;
+        }
+        if me.formats.iter().any(|&(cf, _)| cf == format.cfFormat) { S_OK } else { S_FALSE }
+    }
+
+    unsafe extern "system" fn GetCanonicalFormatEtc(
+        _this: *mut IDataObject,
+        _pformatetc_in: *const FORMATETC,
+        _pformatetc_out: *mut FORMATETC,
+    ) -> HRESULT {
+        E_NOTIMPL
+    }
+
+    unsafe extern "system" fn SetData(
+        _this: *mut IDataObject,
+        _pformatetc: *const FORMATETC,
+        _pformatetc_out: *const FORMATETC,
+        _f_release: BOOL,
+    ) -> HRESULT {
+        E_NOTIMPL
+    }
+
+    unsafe extern "system" fn EnumFormatEtc(
+        this: *mut IDataObject,
+        dw_direction: u32,
+        ppenum: *mut *mut IEnumFORMATETC,
+    ) -> HRESULT {
+        const DATADIR_GET: u32 = 1;
+        if dw_direction != DATADIR_GET {
+            return E_NOTIMPL;
+        }
+        let me = unsafe { Self::from_interface(this) };
+        let formats: Vec<FORMATETC> = me
+            .formats
+            .iter()
+            .map(|&(cf, _)| FORMATETC {
+                cfFormat: cf,
+                ptd: std::ptr::null_mut(),
+                dwAspect: DVASPECT_CONTENT,
+                lindex: -1,
+                tymed: TYMED_HGLOBAL as u32,
+            })
+            .collect();
+        let enumerator = SourceFormatEnumerator::new_boxed(formats);
+        unsafe { *ppenum = enumerator as *mut IEnumFORMATETC };
+        S_OK
+    }
+
+    unsafe extern "system" fn DAdvise(
+        _this: *mut IDataObject,
+        _pformatetc: *const FORMATETC,
+        _advf: u32,
+        _adv_sink: *const crate::definitions::IAdviseSink,
+        _pdw_connection: *mut u32,
+    ) -> HRESULT {
+        OLE_E_ADVISENOTSUPPORTED
+    }
+
+    unsafe extern "system" fn DUnadvise(_this: *mut IDataObject, _connection: u32) -> HRESULT {
+        OLE_E_ADVISENOTSUPPORTED
+    }
+
+    unsafe extern "system" fn EnumDAdvise(
+        _this: *mut IDataObject,
+        _ppenum_advise: *const *const crate::definitions::IEnumSTATDATA,
+    ) -> HRESULT {
+        OLE_E_ADVISENOTSUPPORTED
+    }
+}
+
+static SOURCE_DATA_OBJECT_VTBL: IDataObjectVtbl = IDataObjectVtbl {
+    parent: IUnknownVtbl {
+        QueryInterface: SourceDataObjectData::QueryInterface,
+        AddRef: SourceDataObjectData::AddRef,
+        Release: SourceDataObjectData::Release,
+    },
+    GetData: SourceDataObjectData::GetData,
+    GetDataHere: SourceDataObjectData::GetDataHere,
+    QueryGetData: SourceDataObjectData::QueryGetData,
+    GetCanonicalFormatEtc: SourceDataObjectData::GetCanonicalFormatEtc,
+    SetData: SourceDataObjectData::SetData,
+    EnumFormatEtc: SourceDataObjectData::EnumFormatEtc,
+    DAdvise: SourceDataObjectData::DAdvise,
+    DUnadvise: SourceDataObjectData::DUnadvise,
+    EnumDAdvise: SourceDataObjectData::EnumDAdvise,
+};
+
+pub(crate) struct SourceDataObject {
+    data: *mut SourceDataObjectData,
+}
+
+impl SourceDataObject {
+    pub(crate) fn new(send_data: Box<dyn DataTransferSend>) -> Self {
+        Self { data: SourceDataObjectData::new_boxed(send_data) }
+    }
+
+    pub(crate) fn interface_ptr(&self) -> *mut c_void {
+        self.data as *mut c_void
+    }
+}
+
+impl Drop for SourceDataObject {
+    fn drop(&mut self) {
+        unsafe { SourceDataObjectData::Release(self.data as *mut IUnknown) };
+    }
+}
+
+// ---- IDropSource ------------------------------------------------------------
+
+#[repr(C)]
+#[allow(non_snake_case)]
+struct IDropSourceInterface {
+    lpVtbl: *const IDropSourceVtbl,
+}
+
+#[repr(C)]
+struct DropSourceData {
+    interface: IDropSourceInterface,
+    refcount: AtomicUsize,
+}
+
+#[allow(non_snake_case)]
+impl DropSourceData {
+    fn new_boxed() -> *mut Self {
+        Box::into_raw(Box::new(Self {
+            interface: IDropSourceInterface { lpVtbl: &DROP_SOURCE_VTBL as *const IDropSourceVtbl },
+            refcount: AtomicUsize::new(1),
+        }))
+    }
+
+    unsafe fn from_interface<'a, I>(this: *mut I) -> &'a mut DropSourceData {
+        unsafe { &mut *(this as *mut _) }
+    }
+
+    unsafe extern "system" fn QueryInterface(
+        this: *mut IUnknown,
+        riid: *const GUID,
+        ppv: *mut *mut c_void,
+    ) -> HRESULT {
+        let riid = unsafe { &*riid };
+        if guids_eq(riid, &IID_IUnknown) || guids_eq(riid, &IID_IDropSource) {
+            unsafe { *ppv = this as *mut c_void };
+            unsafe { Self::AddRef(this) };
+            S_OK
+        } else {
+            unsafe { *ppv = std::ptr::null_mut() };
+            E_NOINTERFACE
+        }
+    }
+
+    unsafe extern "system" fn AddRef(this: *mut IUnknown) -> u32 {
+        let me = unsafe { Self::from_interface(this) };
+        me.refcount.fetch_add(1, Ordering::Release) as u32 + 1
+    }
+
+    unsafe extern "system" fn Release(this: *mut IUnknown) -> u32 {
+        let me = unsafe { Self::from_interface(this) };
+        let count = me.refcount.fetch_sub(1, Ordering::Release) - 1;
+        if count == 0 {
+            drop(unsafe { Box::from_raw(me as *mut Self) });
+        }
+        count as u32
+    }
+
+    unsafe extern "system" fn QueryContinueDrag(
+        _this: *mut IDropSource,
+        escape_pressed: BOOL,
+        grf_key_state: u32,
+    ) -> HRESULT {
+        // Drop when no mouse button is pressed - matches Microsoft's documented
+        // `IDropSource` example and covers right-button / middle-button drags as
+        // well as the common left-button case. Hardcoding `MK_LBUTTON` would make
+        // a right-drag (e.g. context-menu drag) never terminate by mouse release.
+        const ANY_MOUSE_BUTTON: u32 =
+            MK_LBUTTON | MK_RBUTTON | MK_MBUTTON | MK_XBUTTON1 | MK_XBUTTON2;
+        if escape_pressed != 0 {
+            return DRAGDROP_S_CANCEL;
+        }
+        if (grf_key_state & ANY_MOUSE_BUTTON) == 0 {
+            return DRAGDROP_S_DROP;
+        }
+        S_OK
+    }
+
+    unsafe extern "system" fn GiveFeedback(_this: *mut IDropSource, _dw_effect: u32) -> HRESULT {
+        DRAGDROP_S_USEDEFAULTCURSORS
+    }
+}
+
+static DROP_SOURCE_VTBL: IDropSourceVtbl = IDropSourceVtbl {
+    parent: IUnknownVtbl {
+        QueryInterface: DropSourceData::QueryInterface,
+        AddRef: DropSourceData::AddRef,
+        Release: DropSourceData::Release,
+    },
+    QueryContinueDrag: DropSourceData::QueryContinueDrag,
+    GiveFeedback: DropSourceData::GiveFeedback,
+};
+
+pub(crate) struct DropSource {
+    data: *mut DropSourceData,
+}
+
+impl DropSource {
+    pub(crate) fn new() -> Self {
+        Self { data: DropSourceData::new_boxed() }
+    }
+
+    pub(crate) fn interface_ptr(&self) -> *mut c_void {
+        self.data as *mut c_void
+    }
+}
+
+impl Drop for DropSource {
+    fn drop(&mut self) {
+        unsafe { DropSourceData::Release(self.data as *mut IUnknown) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_offset(buf: &[u8], name: &str) -> usize {
+        let prefix = format!("{name}:");
+        let head = std::str::from_utf8(buf).unwrap();
+        let pos = head.find(&prefix).unwrap() + prefix.len();
+        head[pos..pos + 10].parse().unwrap()
+    }
+
+    #[test]
+    fn html_clipboard_format_brackets_user_html() {
+        let html = "<span><strong>Winit</strong> example</span>";
+        let buf = build_html_clipboard_format(html);
+
+        assert!(buf.starts_with(b"Version:0.9\r\n"));
+
+        let start_html = parse_offset(&buf, "StartHTML");
+        let end_html = parse_offset(&buf, "EndHTML");
+        let doc = std::str::from_utf8(&buf[start_html..end_html]).unwrap();
+        assert!(doc.starts_with("<html><body>"));
+        assert!(doc.ends_with("</body></html>"));
+
+        let start_fragment = parse_offset(&buf, "StartFragment");
+        let end_fragment = parse_offset(&buf, "EndFragment");
+        let fragment = std::str::from_utf8(&buf[start_fragment..end_fragment]).unwrap();
+        assert_eq!(fragment, html);
+    }
+
+    #[test]
+    fn html_clipboard_format_preserves_pre_wrapped() {
+        let pre_wrapped =
+            "<html><body><!--StartFragment--><p>hi</p><!--EndFragment--></body></html>";
+        let buf = build_html_clipboard_format(pre_wrapped);
+
+        let start_fragment = parse_offset(&buf, "StartFragment");
+        let end_fragment = parse_offset(&buf, "EndFragment");
+        let fragment = std::str::from_utf8(&buf[start_fragment..end_fragment]).unwrap();
+        assert_eq!(fragment, "<p>hi</p>");
     }
 }
