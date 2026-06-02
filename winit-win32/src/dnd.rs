@@ -21,7 +21,7 @@ use windows_sys::Win32::System::Memory::{
 };
 use windows_sys::Win32::System::Ole::{
     CF_HDROP, CF_UNICODETEXT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
-    ReleaseStgMedium,
+    OleDuplicateData, ReleaseStgMedium,
 };
 use windows_sys::Win32::System::SystemServices::{
     MK_LBUTTON, MK_MBUTTON, MK_RBUTTON, MK_XBUTTON1, MK_XBUTTON2,
@@ -35,9 +35,10 @@ use winit_core::event::WindowEvent;
 use winit_core::event_loop::DndActions;
 
 use crate::definitions::{
-    IDataObject, IDataObjectVtbl, IDropSource, IDropSourceVtbl, IDropTarget, IDropTargetVtbl,
-    IEnumFORMATETC, IEnumFORMATETCVtbl, IID_IDataObject, IID_IDropSource, IID_IEnumFORMATETC,
-    IID_IUnknown, IUnknown, IUnknownVtbl,
+    IDataObject, IDataObjectVtbl, IDropSource, IDropSourceVtbl, IDropTarget, IDropTargetHelper,
+    IDropTargetHelperVtbl, IDropTargetVtbl, IEnumFORMATETC, IEnumFORMATETCVtbl, IID_IDataObject,
+    IID_IDropSource, IID_IDropTargetHelper, IID_IEnumFORMATETC, IID_IUnknown, IUnknown,
+    IUnknownVtbl,
 };
 use crate::event_loop::EventLoopRunner;
 use crate::util;
@@ -266,6 +267,11 @@ pub struct FileDropHandlerData {
     runner: Rc<EventLoopRunner>,
     send_event: Box<dyn Fn(WindowEvent)>,
     active_data_transfer_id: Option<DataTransferId>,
+    // Shell drop-target helper. Lazy-init on first DragEnter; null means "not yet created" or
+    // "creation failed and we're running without a drag image". Forwarding to this is what
+    // makes the source's `IDragSourceHelper` bitmap actually render under the cursor over our
+    // own window and any other helper-aware target.
+    drop_target_helper: *mut IDropTargetHelper,
 }
 
 pub struct FileDropHandler {
@@ -286,8 +292,39 @@ impl FileDropHandler {
             runner,
             send_event,
             active_data_transfer_id: None,
+            drop_target_helper: std::ptr::null_mut(),
         });
         FileDropHandler { data: Box::into_raw(data) }
+    }
+
+    /// Lazy-create the shell drop-target helper. Returns null if creation failed; callers should
+    /// treat that as "no drag image" and continue silently - failure is purely cosmetic.
+    unsafe fn ensure_drop_target_helper(data: &mut FileDropHandlerData) -> *mut IDropTargetHelper {
+        use windows_sys::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+        use windows_sys::Win32::UI::Shell::CLSID_DragDropHelper;
+
+        if !data.drop_target_helper.is_null() {
+            return data.drop_target_helper;
+        }
+        let mut helper: *mut IDropTargetHelper = std::ptr::null_mut();
+        let hr = unsafe {
+            CoCreateInstance(
+                &CLSID_DragDropHelper,
+                std::ptr::null_mut(),
+                CLSCTX_ALL,
+                &IID_IDropTargetHelper,
+                &mut helper as *mut _ as *mut _,
+            )
+        };
+        if hr < 0 {
+            return std::ptr::null_mut();
+        }
+        data.drop_target_helper = helper;
+        helper
+    }
+
+    unsafe fn helper_vtbl(helper: *mut IDropTargetHelper) -> &'static IDropTargetHelperVtbl {
+        unsafe { &*(*(helper as *mut *const IDropTargetHelperVtbl)) }
     }
 
     pub(crate) unsafe fn interface_unchecked_mut(&mut self) -> &mut IDropTarget {
@@ -325,6 +362,13 @@ impl FileDropHandler {
             if let Some(id) = drop_handler.active_data_transfer_id.take() {
                 drop_handler.runner.remove_data_transfer(id);
             }
+            // Release the shell drop-target helper if we created one.
+            if !drop_handler.drop_target_helper.is_null() {
+                let vtbl = unsafe { Self::helper_vtbl(drop_handler.drop_target_helper) };
+                unsafe {
+                    (vtbl.parent.Release)(drop_handler.drop_target_helper as *mut IUnknown);
+                }
+            }
             // Destroy the underlying data
             drop(unsafe { Box::from_raw(drop_handler as *mut FileDropHandlerData) });
         }
@@ -352,17 +396,34 @@ impl FileDropHandler {
         let data = Rc::new(unsafe { DataObject::from_idataobject(pDataObj) });
         drop_handler.runner.register_data_transfer(data_transfer_id, data, initial_actions);
 
-        let mut pt = POINT { x: pt.x, y: pt.y };
+        let pt_screen = POINT { x: pt.x, y: pt.y };
+        let mut pt_client = pt_screen;
         unsafe {
-            ScreenToClient(drop_handler.window, &mut pt);
+            ScreenToClient(drop_handler.window, &mut pt_client);
         }
-        let position = PhysicalPosition::new(pt.x as f64, pt.y as f64);
+        let position = PhysicalPosition::new(pt_client.x as f64, pt_client.y as f64);
         (drop_handler.send_event)(WindowEvent::DragEntered {
             id: data_transfer_id,
             position: Some(position),
         });
         unsafe {
             *pdwEffect = DROPEFFECT_NONE;
+        }
+
+        // Forward to the shell drop-target helper so any drag image attached by the source's
+        // IDragSourceHelper renders the bitmap under the cursor while it's over our window.
+        let helper = unsafe { Self::ensure_drop_target_helper(drop_handler) };
+        if !helper.is_null() {
+            let vtbl = unsafe { Self::helper_vtbl(helper) };
+            unsafe {
+                (vtbl.DragEnter)(
+                    helper,
+                    drop_handler.window,
+                    pDataObj as *mut IDataObject,
+                    &pt_screen,
+                    *pdwEffect,
+                );
+            }
         }
 
         S_OK
@@ -386,14 +447,22 @@ impl FileDropHandler {
         let actions = drop_handler.runner.current_drag_actions(data_transfer_id);
         let source_allowed = unsafe { *pdwEffect };
 
-        let mut pt = POINT { x: pt.x, y: pt.y };
+        let pt_screen = POINT { x: pt.x, y: pt.y };
+        let mut pt_client = pt_screen;
         unsafe {
-            ScreenToClient(drop_handler.window, &mut pt);
+            ScreenToClient(drop_handler.window, &mut pt_client);
         }
-        let position = PhysicalPosition::new(pt.x as f64, pt.y as f64);
+        let position = PhysicalPosition::new(pt_client.x as f64, pt_client.y as f64);
         (drop_handler.send_event)(WindowEvent::DragPosition { id: data_transfer_id, position });
+        let new_effect = pick_effect(actions, grfKeyState, source_allowed);
         unsafe {
-            *pdwEffect = pick_effect(actions, grfKeyState, source_allowed);
+            *pdwEffect = new_effect;
+        }
+
+        let helper = drop_handler.drop_target_helper;
+        if !helper.is_null() {
+            let vtbl = unsafe { Self::helper_vtbl(helper) };
+            unsafe { (vtbl.DragOver)(helper, &pt_screen, new_effect) };
         }
 
         S_OK
@@ -408,12 +477,18 @@ impl FileDropHandler {
         (drop_handler.send_event)(WindowEvent::DragLeft { id: data_transfer_id });
         drop_handler.runner.remove_data_transfer(data_transfer_id);
 
+        let helper = drop_handler.drop_target_helper;
+        if !helper.is_null() {
+            let vtbl = unsafe { Self::helper_vtbl(helper) };
+            unsafe { (vtbl.DragLeave)(helper) };
+        }
+
         S_OK
     }
 
     unsafe extern "system" fn Drop(
         this: *mut IDropTarget,
-        _pDataObj: *const IDataObject,
+        pDataObj: *const IDataObject,
         grfKeyState: u32,
         pt: POINTL,
         pdwEffect: *mut u32,
@@ -430,10 +505,12 @@ impl FileDropHandler {
         let actions = drop_handler.runner.current_drag_actions(data_transfer_id);
         let source_allowed = unsafe { *pdwEffect };
 
-        let mut pt = POINT { x: pt.x, y: pt.y };
+        let pt_screen = POINT { x: pt.x, y: pt.y };
+        let mut pt_client = pt_screen;
         unsafe {
-            ScreenToClient(drop_handler.window, &mut pt);
+            ScreenToClient(drop_handler.window, &mut pt_client);
         }
+        let pt = pt_client;
 
         // Negotiate the effect first so we can pick the right outgoing event. If the app
         // rejected the drop (e.g. via `set_valid_actions(none())`), `pick_effect` returns
@@ -451,6 +528,14 @@ impl FileDropHandler {
         (drop_handler.send_event)(event);
         unsafe {
             *pdwEffect = effect;
+        }
+
+        let helper = drop_handler.drop_target_helper;
+        if !helper.is_null() {
+            let vtbl = unsafe { Self::helper_vtbl(helper) };
+            unsafe {
+                (vtbl.Drop)(helper, pDataObj as *mut IDataObject, &pt_screen, effect);
+            }
         }
 
         // External drop: the app's handler dispatched synchronously above and has already read
@@ -584,6 +669,44 @@ fn cf_formats_for_hint(hint: TypeHint) -> Vec<(u16, TypeHint)> {
         },
         _ => Vec::new(),
     }
+}
+
+/// Duplicate a `STGMEDIUM` for handing out via `GetData` without losing the original.
+///
+/// Delegates to `OleDuplicateData` which knows how to clone HGLOBAL, HBITMAP, HENHMETAFILE,
+/// HMETAFILEPICT and file-name mediums. Returns `None` for tymeds the shell helper doesn't use
+/// (interface-based mediums like IStream / IStorage) so we never hand out an aliased pointer
+/// the caller would later `Release` once we also drop ours.
+unsafe fn duplicate_stgmedium(src: &STGMEDIUM, cf_format: u16) -> Option<STGMEDIUM> {
+    use windows_sys::Win32::Foundation::HANDLE;
+
+    let handle: HANDLE = unsafe {
+        match src.tymed {
+            t if t == TYMED_HGLOBAL as u32 => src.u.hGlobal as HANDLE,
+            // Other handle-typed tymeds; the shell drag helper doesn't currently use these but
+            // OleDuplicateData supports them so we'd rather forward than refuse.
+            1 /* TYMED_FILE */ => src.u.lpszFileName as HANDLE,
+            32 /* TYMED_GDI / HBITMAP */ => src.u.hBitmap as HANDLE,
+            64 /* TYMED_MFPICT */ => src.u.hMetaFilePict as HANDLE,
+            128 /* TYMED_ENHMF */ => src.u.hEnhMetaFile as HANDLE,
+            _ => return None,
+        }
+    };
+    let dup = unsafe { OleDuplicateData(handle, cf_format, 0) };
+    if dup.is_null() {
+        return None;
+    }
+    let mut out: STGMEDIUM = unsafe { std::mem::zeroed() };
+    out.tymed = src.tymed;
+    match src.tymed {
+        t if t == TYMED_HGLOBAL as u32 => out.u.hGlobal = dup as _,
+        1 => out.u.lpszFileName = dup as _,
+        32 => out.u.hBitmap = dup as _,
+        64 => out.u.hMetaFilePict = dup as _,
+        128 => out.u.hEnhMetaFile = dup as _,
+        _ => unreachable!(),
+    }
+    Some(out)
 }
 
 unsafe fn alloc_hglobal_from(src: *const u8, len: usize) -> Option<HGLOBAL> {
@@ -881,6 +1004,15 @@ struct IDataObjectInterface {
     lpVtbl: *const IDataObjectVtbl,
 }
 
+/// Owning wrapper around a `STGMEDIUM` that releases the underlying handle on drop.
+struct OwnedStgMedium(STGMEDIUM);
+
+impl Drop for OwnedStgMedium {
+    fn drop(&mut self) {
+        unsafe { ReleaseStgMedium(&mut self.0) };
+    }
+}
+
 #[repr(C)]
 struct SourceDataObjectData {
     interface: IDataObjectInterface,
@@ -888,6 +1020,10 @@ struct SourceDataObjectData {
     send_data: RefCell<Box<dyn DataTransferSend>>,
     // (cf_format, hint) pairs we advertise to the target.
     formats: Vec<(u16, TypeHint)>,
+    // Formats injected via `SetData` - primarily by `IDragSourceHelper::InitializeFromBitmap`,
+    // which stores the drag image bits (CFSTR_DRAGIMAGEBITS) and related shell formats here so
+    // the target-side `IDropTargetHelper` can read them back via `GetData`.
+    extras: RefCell<Vec<(FORMATETC, OwnedStgMedium)>>,
 }
 
 com_iunknown_impl!(SourceDataObjectData, &IID_IDataObject);
@@ -914,6 +1050,7 @@ impl SourceDataObjectData {
             refcount: AtomicUsize::new(1),
             send_data: RefCell::new(send_data),
             formats,
+            extras: RefCell::new(Vec::new()),
         }))
     }
 
@@ -926,6 +1063,21 @@ impl SourceDataObjectData {
         let format = unsafe { &*pformatetc_in };
         if (format.tymed & TYMED_HGLOBAL as u32) == 0 {
             return DV_E_FORMATETC;
+        }
+        // Shell-helper-injected formats live in `extras`; serve those first by duplicating the
+        // stored HGLOBAL so the caller can `ReleaseStgMedium` independently of our storage.
+        if let Ok(extras) = me.extras.try_borrow() {
+            if let Some((stored_fmt, stored)) =
+                extras.iter().find(|(f, _)| f.cfFormat == format.cfFormat)
+            {
+                if (stored_fmt.tymed & format.tymed) != 0 {
+                    if let Some(dup) = unsafe { duplicate_stgmedium(&stored.0, format.cfFormat) } {
+                        unsafe { *pmedium = dup };
+                        return S_OK;
+                    }
+                    return E_FAIL;
+                }
+            }
         }
         let Some(&(_, hint)) = me.formats.iter().find(|&&(cf, _)| cf == format.cfFormat) else {
             return DV_E_FORMATETC;
@@ -969,7 +1121,15 @@ impl SourceDataObjectData {
         if (format.tymed & TYMED_HGLOBAL as u32) == 0 {
             return DV_E_FORMATETC;
         }
-        if me.formats.iter().any(|&(cf, _)| cf == format.cfFormat) { S_OK } else { S_FALSE }
+        if me.formats.iter().any(|&(cf, _)| cf == format.cfFormat) {
+            return S_OK;
+        }
+        if let Ok(extras) = me.extras.try_borrow() {
+            if extras.iter().any(|(f, _)| f.cfFormat == format.cfFormat) {
+                return S_OK;
+            }
+        }
+        S_FALSE
     }
 
     unsafe extern "system" fn GetCanonicalFormatEtc(
@@ -981,12 +1141,47 @@ impl SourceDataObjectData {
     }
 
     unsafe extern "system" fn SetData(
-        _this: *mut IDataObject,
-        _pformatetc: *const FORMATETC,
-        _pformatetc_out: *const FORMATETC,
-        _f_release: BOOL,
+        this: *mut IDataObject,
+        pformatetc: *const FORMATETC,
+        pmedium: *const STGMEDIUM,
+        f_release: BOOL,
     ) -> HRESULT {
-        E_NOTIMPL
+        // Primary caller is `IDragSourceHelper::InitializeFromBitmap`, which attaches the drag
+        // image bits and related shell formats to our data object. We don't interpret them -
+        // just hold them so `GetData` can hand them back to `IDropTargetHelper`.
+        let me = unsafe { Self::from_interface(this) };
+        if pformatetc.is_null() || pmedium.is_null() {
+            return E_FAIL;
+        }
+        let format = unsafe { *pformatetc };
+        let medium = if f_release != 0 {
+            // We take ownership of the passed-in medium as-is.
+            unsafe { *pmedium }
+        } else {
+            // Caller retains ownership; we must duplicate.
+            let Some(dup) = (unsafe { duplicate_stgmedium(&*pmedium, format.cfFormat) }) else {
+                return E_FAIL;
+            };
+            dup
+        };
+        let Ok(mut extras) = me.extras.try_borrow_mut() else {
+            if f_release != 0 {
+                // We promised to take ownership but can't store - release immediately so we
+                // don't leak.
+                let mut m = medium;
+                unsafe { ReleaseStgMedium(&mut m) };
+            }
+            return E_UNEXPECTED;
+        };
+        // Replace any earlier entry with the same format - last-write-wins matches what real
+        // shell apps do and avoids growing the vec unboundedly on repeated SetData calls.
+        if let Some(slot) = extras.iter_mut().find(|(f, _)| f.cfFormat == format.cfFormat) {
+            slot.0 = format;
+            slot.1 = OwnedStgMedium(medium);
+        } else {
+            extras.push((format, OwnedStgMedium(medium)));
+        }
+        S_OK
     }
 
     unsafe extern "system" fn EnumFormatEtc(
@@ -999,7 +1194,7 @@ impl SourceDataObjectData {
             return E_NOTIMPL;
         }
         let me = unsafe { Self::from_interface(this) };
-        let formats: Vec<FORMATETC> = me
+        let mut formats: Vec<FORMATETC> = me
             .formats
             .iter()
             .map(|&(cf, _)| FORMATETC {
@@ -1010,6 +1205,13 @@ impl SourceDataObjectData {
                 tymed: TYMED_HGLOBAL as u32,
             })
             .collect();
+        if let Ok(extras) = me.extras.try_borrow() {
+            for (fmt, _) in extras.iter() {
+                if !formats.iter().any(|f| f.cfFormat == fmt.cfFormat) {
+                    formats.push(*fmt);
+                }
+            }
+        }
         let enumerator = SourceFormatEnumerator::new_boxed(formats);
         unsafe { *ppenum = enumerator as *mut IEnumFORMATETC };
         S_OK
@@ -1152,6 +1354,122 @@ impl Drop for DropSource {
     fn drop(&mut self) {
         unsafe { DropSourceData::Release(self.data as *mut IUnknown) };
     }
+}
+
+/// Attach a drag image to `data_object` so the shell renders the app's icon under the cursor
+/// during the drag instead of the default no-image cursor.
+///
+/// `rgba` is the icon's pixel buffer in straight RGBA8 with `width * height * 4` bytes;
+/// `hot_offset` is the icon-relative offset of the cursor hot spot (cross-platform sign:
+/// `(-w/2, -h/2)` centres the icon on the cursor).
+///
+/// Returns `Ok(())` on success. On failure the caller's data object is left untouched and the
+/// drag still runs - just without a custom image. We never propagate the error: a missing drag
+/// preview is purely cosmetic and shouldn't fail the whole `start_drag`.
+pub(crate) unsafe fn apply_drag_image(
+    data_object: *mut IDataObject,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    hot_offset: dpi::PhysicalPosition<i32>,
+) -> Result<(), HRESULT> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject, HDC,
+    };
+    use windows_sys::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+    use windows_sys::Win32::UI::Shell::{CLSID_DragDropHelper, SHDRAGIMAGE};
+
+    use crate::definitions::{IDragSourceHelper, IDragSourceHelperVtbl, IID_IDragSourceHelper};
+
+    if width == 0 || height == 0 || rgba.len() != (width as usize) * (height as usize) * 4 {
+        return Err(E_FAIL);
+    }
+
+    // Build a top-down 32bpp BGRA DIB. Top-down means negative biHeight; the shell helper
+    // expects BGRA byte order (B, G, R, A) with premultiplied alpha for smooth compositing.
+    let mut header: BITMAPINFO = unsafe { std::mem::zeroed() };
+    header.bmiHeader = BITMAPINFOHEADER {
+        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: width as i32,
+        biHeight: -(height as i32),
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB,
+        biSizeImage: width * height * 4,
+        biXPelsPerMeter: 0,
+        biYPelsPerMeter: 0,
+        biClrUsed: 0,
+        biClrImportant: 0,
+    };
+
+    let mut bits_ptr: *mut c_void = std::ptr::null_mut();
+    let hbitmap = unsafe {
+        CreateDIBSection(
+            std::ptr::null_mut::<HDC>() as HDC,
+            &header,
+            DIB_RGB_COLORS,
+            &mut bits_ptr,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if hbitmap.is_null() || bits_ptr.is_null() {
+        return Err(E_FAIL);
+    }
+
+    // Copy RGBA -> premultiplied BGRA so the shell can render the image with smooth alpha
+    // edges. Without premultiplication, the cursor preview shows a halo on every translucent
+    // pixel.
+    let dst = unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, rgba.len()) };
+    for (src_px, dst_px) in rgba.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+        let (r, g, b, a) = (src_px[0] as u32, src_px[1] as u32, src_px[2] as u32, src_px[3]);
+        dst_px[0] = ((b * a as u32) / 255) as u8;
+        dst_px[1] = ((g * a as u32) / 255) as u8;
+        dst_px[2] = ((r * a as u32) / 255) as u8;
+        dst_px[3] = a;
+    }
+
+    let mut helper: *mut IDragSourceHelper = std::ptr::null_mut();
+    let hr = unsafe {
+        CoCreateInstance(
+            &CLSID_DragDropHelper,
+            std::ptr::null_mut(),
+            CLSCTX_ALL,
+            &IID_IDragSourceHelper,
+            &mut helper as *mut _ as *mut _,
+        )
+    };
+    if hr < 0 || helper.is_null() {
+        unsafe { DeleteObject(hbitmap as _) };
+        return Err(hr);
+    }
+
+    // The helper API takes `ptOffset` as the cursor's position inside the image (positive
+    // values into the image), but cross-platform `DragIcon::offset` is the icon-relative
+    // offset where the cursor sits (negative values mean the icon extends up/left of the
+    // cursor). Negate to translate between the two conventions.
+    let sdi = SHDRAGIMAGE {
+        sizeDragImage: windows_sys::Win32::Foundation::SIZE { cx: width as i32, cy: height as i32 },
+        ptOffset: POINT { x: -hot_offset.x, y: -hot_offset.y },
+        hbmpDragImage: hbitmap,
+        crColorKey: 0xffff_ffff, // CLR_NONE - use the alpha channel
+    };
+
+    let vtbl = unsafe {
+        &*((*(helper as *mut *mut IDragSourceHelperVtbl)) as *const IDragSourceHelperVtbl)
+    };
+    let init_hr = unsafe { (vtbl.InitializeFromBitmap)(helper, &sdi, data_object) };
+    let release = vtbl.parent.Release;
+    unsafe { release(helper as *mut IUnknown) };
+
+    if init_hr < 0 {
+        // On failure the helper did not take ownership of the bitmap - we still own it.
+        unsafe { DeleteObject(hbitmap as _) };
+        return Err(init_hr);
+    }
+    // On success the helper stores the bitmap on the data object and will delete it later;
+    // do NOT call DeleteObject here.
+    Ok(())
 }
 
 #[cfg(test)]

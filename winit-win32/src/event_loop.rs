@@ -525,7 +525,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
         _source: WindowId,
         send_data: Box<dyn DataTransferSend>,
         action_mask: &dyn DndActionMask,
-        _icon: Option<DragIcon>,
+        icon: Option<DragIcon>,
     ) -> Result<DataTransferId, RequestError> {
         let allowed_actions = action_mask.hint();
         let allowed_effects = crate::dnd::actions_to_dropeffect_mask(allowed_actions);
@@ -543,6 +543,27 @@ impl RootActiveEventLoop for ActiveEventLoop {
         let id = crate::dnd::next_data_transfer_id();
         let data_object = SourceDataObject::new(send_data);
         let drop_source = DropSource::new();
+
+        // Attach a drag preview if the app supplied one. Cosmetic failures must not abort the
+        // drag - the gesture still works, just without a custom image - so log and move on.
+        if let Some(icon) = icon {
+            if let Some(rgba) = icon.icon.cast_ref::<winit_core::icon::RgbaIcon>() {
+                let result = unsafe {
+                    crate::dnd::apply_drag_image(
+                        data_object.interface_ptr() as *mut _,
+                        rgba.width(),
+                        rgba.height(),
+                        rgba.buffer(),
+                        icon.offset,
+                    )
+                };
+                if let Err(hr) = result {
+                    tracing::warn!("Failed to attach drag image: hr=0x{hr:08x}");
+                }
+            } else {
+                tracing::warn!("DragIcon::icon must be an RgbaIcon on win32; ignoring");
+            }
+        }
 
         // Make the drag visible to our own target-side `IDropTarget` so it can recognize
         // self-drops and reuse this id + action mask without going through the (buffered) app

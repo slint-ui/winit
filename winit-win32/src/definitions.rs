@@ -3,8 +3,9 @@
 
 use std::ffi::c_void;
 
-use windows_sys::Win32::Foundation::{HWND, POINTL};
+use windows_sys::Win32::Foundation::{HWND, POINT, POINTL};
 use windows_sys::Win32::System::Com::{FORMATETC, STGMEDIUM};
+use windows_sys::Win32::UI::Shell::SHDRAGIMAGE;
 use windows_sys::core::{BOOL, GUID, HRESULT};
 
 pub type IUnknown = *mut c_void;
@@ -47,7 +48,7 @@ pub struct IDataObjectVtbl {
     pub SetData: unsafe extern "system" fn(
         This: *mut IDataObject,
         pformatetc: *const FORMATETC,
-        pformatetcOut: *const FORMATETC,
+        pmedium: *const STGMEDIUM,
         fRelease: BOOL,
     ) -> HRESULT,
     pub EnumFormatEtc: unsafe extern "system" fn(
@@ -84,6 +85,51 @@ pub struct IEnumFORMATETCVtbl {
         This: *mut IEnumFORMATETC,
         ppenum: *mut *mut IEnumFORMATETC,
     ) -> HRESULT,
+}
+
+pub type IDragSourceHelper = *mut c_void;
+
+#[repr(C)]
+pub struct IDragSourceHelperVtbl {
+    pub parent: IUnknownVtbl,
+    pub InitializeFromBitmap: unsafe extern "system" fn(
+        This: *mut IDragSourceHelper,
+        pshdi: *const SHDRAGIMAGE,
+        pDataObject: *mut IDataObject,
+    ) -> HRESULT,
+    pub InitializeFromWindow: unsafe extern "system" fn(
+        This: *mut IDragSourceHelper,
+        hwnd: HWND,
+        ppt: *const POINT,
+        pDataObject: *mut IDataObject,
+    ) -> HRESULT,
+}
+
+pub type IDropTargetHelper = *mut c_void;
+
+#[repr(C)]
+pub struct IDropTargetHelperVtbl {
+    pub parent: IUnknownVtbl,
+    pub DragEnter: unsafe extern "system" fn(
+        This: *mut IDropTargetHelper,
+        hwndTarget: HWND,
+        pDataObject: *mut IDataObject,
+        ppt: *const POINT,
+        dwEffect: u32,
+    ) -> HRESULT,
+    pub DragLeave: unsafe extern "system" fn(This: *mut IDropTargetHelper) -> HRESULT,
+    pub DragOver: unsafe extern "system" fn(
+        This: *mut IDropTargetHelper,
+        ppt: *const POINT,
+        dwEffect: u32,
+    ) -> HRESULT,
+    pub Drop: unsafe extern "system" fn(
+        This: *mut IDropTargetHelper,
+        pDataObject: *mut IDataObject,
+        ppt: *const POINT,
+        dwEffect: u32,
+    ) -> HRESULT,
+    pub Show: unsafe extern "system" fn(This: *mut IDropTargetHelper, fShow: BOOL) -> HRESULT,
 }
 
 pub type IDropSource = *mut c_void;
@@ -187,6 +233,22 @@ pub const IID_IEnumFORMATETC: GUID = GUID {
     data2: 0x0000,
     data3: 0x0000,
     data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+
+// {DE5BF786-477A-11D2-839D-00C04FD918D0}
+pub const IID_IDragSourceHelper: GUID = GUID {
+    data1: 0xde5bf786,
+    data2: 0x477a,
+    data3: 0x11d2,
+    data4: [0x83, 0x9d, 0x00, 0xc0, 0x4f, 0xd9, 0x18, 0xd0],
+};
+
+// {4657278B-411B-11D2-839A-00C04FD918D0}
+pub const IID_IDropTargetHelper: GUID = GUID {
+    data1: 0x4657278b,
+    data2: 0x411b,
+    data3: 0x11d2,
+    data4: [0x83, 0x9a, 0x00, 0xc0, 0x4f, 0xd9, 0x18, 0xd0],
 };
 
 pub const CLSID_TaskbarList: GUID = GUID {
