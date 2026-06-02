@@ -31,9 +31,11 @@ struct Application {
     drag_icon: Icon,
 }
 
+const DRAG_IMAGE: &[u8] = include_bytes!("data/icon.png");
+
 impl Application {
     fn new() -> Self {
-        let drag_icon = load_icon(include_bytes!("data/icon.png"));
+        let drag_icon = load_icon(DRAG_IMAGE);
 
         Self { window: None, last_dnd_fetch: None, last_drag_start: None, drag_icon }
     }
@@ -73,17 +75,22 @@ impl ApplicationHandler for Application {
                         let _ = event_loop.cancel_drag(last_drag);
                     }
 
-                    self.last_drag_start = dbg!(event_loop.start_drag(
+                    let result = event_loop.start_drag(
                         window_id,
                         DataTransferSendBuilder::new(())
-                            .with_type(TypeHint::Plaintext, |()| {
-                                "Winit example".to_string().into()
+                            .with_type(TypeHint::Plaintext, |()| "Winit example".to_string().into())
+                            .with_type(TypeHint::Html, |()| {
+                                format!("<strong>Winit</strong> example").into()
+                            })
+                            .with_type(TypeHint::Image { extension_hint: Some("png") }, |()| {
+                                DRAG_IMAGE.to_vec().into()
                             })
                             .build(),
                         &DndActions::new_copy(),
                         Some(self.drag_icon.clone()),
-                    ))
-                    .ok();
+                    );
+
+                    self.last_drag_start = dbg!(result).ok();
                 }
             },
             WindowEvent::DragLeft { .. } => {
