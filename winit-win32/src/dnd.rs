@@ -5,7 +5,7 @@ use std::io;
 use std::ops::ControlFlow;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{self, AtomicI64, AtomicUsize, Ordering};
 
 use dpi::PhysicalPosition;
 use windows_sys::Win32::Foundation::{
@@ -309,14 +309,17 @@ impl FileDropHandler {
 
     unsafe extern "system" fn AddRef(this: *mut IUnknown) -> u32 {
         let drop_handler_data = unsafe { Self::from_interface(this) };
-        let count = drop_handler_data.refcount.fetch_add(1, Ordering::Release) + 1;
+        let count = drop_handler_data.refcount.fetch_add(1, Ordering::Relaxed) + 1;
         count as u32
     }
 
     unsafe extern "system" fn Release(this: *mut IUnknown) -> u32 {
         let drop_handler = unsafe { Self::from_interface(this) };
+        // See the SourceDataObject Release for why we use Release on decrement and an
+        // Acquire fence on the zero-transition (standard Arc pattern).
         let count = drop_handler.refcount.fetch_sub(1, Ordering::Release) - 1;
         if count == 0 {
+            atomic::fence(Ordering::Acquire);
             // Drop any transfer still in flight (e.g. the window was destroyed mid-drag, so no
             // `DragLeave`/`Drop` ever arrived to clean it up).
             if let Some(id) = drop_handler.active_data_transfer_id.take() {
@@ -731,6 +734,61 @@ struct IEnumFORMATETCInterface {
     lpVtbl: *const IEnumFORMATETCVtbl,
 }
 
+/// Generates the shared `IUnknown` boilerplate for our hand-rolled COM source-side objects.
+///
+/// Each such object is a `Box`-allocated `#[repr(C)]` struct whose first field is its COM
+/// interface and which carries an `AtomicUsize` `refcount`. The thunks are identical across
+/// objects apart from the concrete type and the one extra IID accepted by `QueryInterface`, so
+/// the subtle refcount memory ordering lives in exactly one place.
+macro_rules! com_iunknown_impl {
+    ($ty:ty, $extra_iid:expr) => {
+        #[allow(non_snake_case)]
+        impl $ty {
+            unsafe fn from_interface<'a, I>(this: *mut I) -> &'a mut Self {
+                unsafe { &mut *(this as *mut _) }
+            }
+
+            unsafe extern "system" fn QueryInterface(
+                this: *mut IUnknown,
+                riid: *const GUID,
+                ppv: *mut *mut c_void,
+            ) -> HRESULT {
+                let riid = unsafe { &*riid };
+                if guids_eq(riid, &IID_IUnknown) || guids_eq(riid, $extra_iid) {
+                    unsafe { *ppv = this as *mut c_void };
+                    unsafe { Self::AddRef(this) };
+                    S_OK
+                } else {
+                    unsafe { *ppv = std::ptr::null_mut() };
+                    E_NOINTERFACE
+                }
+            }
+
+            unsafe extern "system" fn AddRef(this: *mut IUnknown) -> u32 {
+                let me = unsafe { Self::from_interface(this) };
+                // Mere refcount bump - Relaxed is enough; the caller already holds a synchronized
+                // reference to the object.
+                me.refcount.fetch_add(1, Ordering::Relaxed) as u32 + 1
+            }
+
+            unsafe extern "system" fn Release(this: *mut IUnknown) -> u32 {
+                let me = unsafe { Self::from_interface(this) };
+                // Release on decrement publishes any writes made through this reference before the
+                // count is observed by other threads. When we hit zero, fence with Acquire so the
+                // destructor sees all writes from prior Releases on other threads - the standard
+                // Arc pattern. Without the fence, dropping the box could race with reads done by
+                // the last releasing thread on another core.
+                let count = me.refcount.fetch_sub(1, Ordering::Release) - 1;
+                if count == 0 {
+                    atomic::fence(Ordering::Acquire);
+                    drop(unsafe { Box::from_raw(me as *mut Self) });
+                }
+                count as u32
+            }
+        }
+    };
+}
+
 #[repr(C)]
 struct SourceFormatEnumerator {
     interface: IEnumFORMATETCInterface,
@@ -738,6 +796,8 @@ struct SourceFormatEnumerator {
     formats: Vec<FORMATETC>,
     cursor: Cell<usize>,
 }
+
+com_iunknown_impl!(SourceFormatEnumerator, &IID_IEnumFORMATETC);
 
 #[allow(non_snake_case)]
 impl SourceFormatEnumerator {
@@ -750,40 +810,6 @@ impl SourceFormatEnumerator {
             formats,
             cursor: Cell::new(0),
         }))
-    }
-
-    unsafe fn from_interface<'a, I>(this: *mut I) -> &'a mut SourceFormatEnumerator {
-        unsafe { &mut *(this as *mut _) }
-    }
-
-    unsafe extern "system" fn QueryInterface(
-        this: *mut IUnknown,
-        riid: *const GUID,
-        ppv: *mut *mut c_void,
-    ) -> HRESULT {
-        let riid = unsafe { &*riid };
-        if guids_eq(riid, &IID_IUnknown) || guids_eq(riid, &IID_IEnumFORMATETC) {
-            unsafe { *ppv = this as *mut c_void };
-            unsafe { Self::AddRef(this) };
-            S_OK
-        } else {
-            unsafe { *ppv = std::ptr::null_mut() };
-            E_NOINTERFACE
-        }
-    }
-
-    unsafe extern "system" fn AddRef(this: *mut IUnknown) -> u32 {
-        let me = unsafe { Self::from_interface(this) };
-        me.refcount.fetch_add(1, Ordering::Release) as u32 + 1
-    }
-
-    unsafe extern "system" fn Release(this: *mut IUnknown) -> u32 {
-        let me = unsafe { Self::from_interface(this) };
-        let count = me.refcount.fetch_sub(1, Ordering::Release) - 1;
-        if count == 0 {
-            drop(unsafe { Box::from_raw(me as *mut Self) });
-        }
-        count as u32
     }
 
     unsafe extern "system" fn Next(
@@ -864,6 +890,8 @@ struct SourceDataObjectData {
     formats: Vec<(u16, TypeHint)>,
 }
 
+com_iunknown_impl!(SourceDataObjectData, &IID_IDataObject);
+
 #[allow(non_snake_case)]
 impl SourceDataObjectData {
     fn new_boxed(send_data: Box<dyn DataTransferSend>) -> *mut Self {
@@ -887,40 +915,6 @@ impl SourceDataObjectData {
             send_data: RefCell::new(send_data),
             formats,
         }))
-    }
-
-    unsafe fn from_interface<'a, I>(this: *mut I) -> &'a mut SourceDataObjectData {
-        unsafe { &mut *(this as *mut _) }
-    }
-
-    unsafe extern "system" fn QueryInterface(
-        this: *mut IUnknown,
-        riid: *const GUID,
-        ppv: *mut *mut c_void,
-    ) -> HRESULT {
-        let riid = unsafe { &*riid };
-        if guids_eq(riid, &IID_IUnknown) || guids_eq(riid, &IID_IDataObject) {
-            unsafe { *ppv = this as *mut c_void };
-            unsafe { Self::AddRef(this) };
-            S_OK
-        } else {
-            unsafe { *ppv = std::ptr::null_mut() };
-            E_NOINTERFACE
-        }
-    }
-
-    unsafe extern "system" fn AddRef(this: *mut IUnknown) -> u32 {
-        let me = unsafe { Self::from_interface(this) };
-        me.refcount.fetch_add(1, Ordering::Release) as u32 + 1
-    }
-
-    unsafe extern "system" fn Release(this: *mut IUnknown) -> u32 {
-        let me = unsafe { Self::from_interface(this) };
-        let count = me.refcount.fetch_sub(1, Ordering::Release) - 1;
-        if count == 0 {
-            drop(unsafe { Box::from_raw(me as *mut Self) });
-        }
-        count as u32
     }
 
     unsafe extern "system" fn GetData(
@@ -1094,6 +1088,8 @@ struct DropSourceData {
     refcount: AtomicUsize,
 }
 
+com_iunknown_impl!(DropSourceData, &IID_IDropSource);
+
 #[allow(non_snake_case)]
 impl DropSourceData {
     fn new_boxed() -> *mut Self {
@@ -1101,40 +1097,6 @@ impl DropSourceData {
             interface: IDropSourceInterface { lpVtbl: &DROP_SOURCE_VTBL as *const IDropSourceVtbl },
             refcount: AtomicUsize::new(1),
         }))
-    }
-
-    unsafe fn from_interface<'a, I>(this: *mut I) -> &'a mut DropSourceData {
-        unsafe { &mut *(this as *mut _) }
-    }
-
-    unsafe extern "system" fn QueryInterface(
-        this: *mut IUnknown,
-        riid: *const GUID,
-        ppv: *mut *mut c_void,
-    ) -> HRESULT {
-        let riid = unsafe { &*riid };
-        if guids_eq(riid, &IID_IUnknown) || guids_eq(riid, &IID_IDropSource) {
-            unsafe { *ppv = this as *mut c_void };
-            unsafe { Self::AddRef(this) };
-            S_OK
-        } else {
-            unsafe { *ppv = std::ptr::null_mut() };
-            E_NOINTERFACE
-        }
-    }
-
-    unsafe extern "system" fn AddRef(this: *mut IUnknown) -> u32 {
-        let me = unsafe { Self::from_interface(this) };
-        me.refcount.fetch_add(1, Ordering::Release) as u32 + 1
-    }
-
-    unsafe extern "system" fn Release(this: *mut IUnknown) -> u32 {
-        let me = unsafe { Self::from_interface(this) };
-        let count = me.refcount.fetch_sub(1, Ordering::Release) - 1;
-        if count == 0 {
-            drop(unsafe { Box::from_raw(me as *mut Self) });
-        }
-        count as u32
     }
 
     unsafe extern "system" fn QueryContinueDrag(
