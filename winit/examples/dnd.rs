@@ -86,10 +86,6 @@ impl ApplicationHandler for Application {
                 };
 
                 if button == MouseButton::Left && state.is_pressed() {
-                    if let Some(last_drag) = self.last_drag_start.take() {
-                        let _ = event_loop.cancel_drag(last_drag);
-                    }
-
                     let (icon, offset) = self.drag_icon.clone();
 
                     // In a real application, you probably wouldn't advertise so many types.

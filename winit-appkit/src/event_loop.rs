@@ -265,10 +265,6 @@ impl RootActiveEventLoop for ActiveEventLoop {
             })
             .ok_or(RequestError::Ignored)?
     }
-
-    fn cancel_drag(&self, _id: DataTransferId) -> Result<(), RequestError> {
-        Ok(())
-    }
 }
 
 /// An operation was attempted on a data transfer ID, but that ID was invalid.

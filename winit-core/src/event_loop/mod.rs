@@ -195,17 +195,6 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
             DATA_TRANSFER_UNSUPPORTED_ERROR_MESSAGE,
         )))
     }
-
-    /// Cancel a drag-and-drop operation.
-    ///
-    /// This can be called on data transfers initiated by this application, as well as data
-    /// transfers received from an external application.
-    fn cancel_drag(&self, id: DataTransferId) -> Result<(), RequestError> {
-        let _ = id;
-        Err(RequestError::NotSupported(NotSupportedError::new(
-            DATA_TRANSFER_UNSUPPORTED_ERROR_MESSAGE,
-        )))
-    }
 }
 
 const DATA_TRANSFER_UNSUPPORTED_ERROR_MESSAGE: &str = {
