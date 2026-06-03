@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -5,13 +6,15 @@ use std::time::{Duration, Instant};
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
-use objc2::{MainThreadMarker, available};
+use objc2::{AnyThread, ClassType, MainThreadMarker, available};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDidFinishLaunchingNotification,
-    NSApplicationWillTerminateNotification, NSView, NSWindow,
+    NSApplicationWillTerminateNotification, NSDraggingItem, NSWindow,
 };
-use objc2_core_foundation::{CFIndex, CFRunLoopActivity, kCFRunLoopCommonModes};
-use objc2_foundation::{NSNotificationCenter, NSObjectProtocol};
+use objc2_core_foundation::{
+    CFIndex, CFRunLoopActivity, CGPoint, CGRect, CGSize, kCFRunLoopCommonModes,
+};
+use objc2_foundation::{NSArray, NSNotificationCenter, NSObjectProtocol, NSString};
 use rwh_06::HasDisplayHandle;
 use tracing::debug_span;
 use winit_common::core_foundation::{MainRunLoop, MainRunLoopObserver, tracing_observers};
@@ -19,7 +22,7 @@ use winit_common::foundation::create_observer;
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{CustomCursor as CoreCustomCursor, CustomCursorSource};
 use winit_core::data_transfer::{
-    DataTransfer, DataTransferId, DataTransferSend, TransferType, TypedData,
+    DataTransfer, DataTransferId, DataTransferSend, SendData, TransferType, TypeHint, TypedData,
 };
 use winit_core::error::{EventLoopError, RequestError};
 use winit_core::event_loop::pump_events::PumpStatus;
@@ -37,7 +40,8 @@ use super::event::dummy_event;
 use super::monitor;
 use crate::ActivationPolicy;
 use crate::app_state::DragState;
-use crate::dnd::DragOperation;
+use crate::cursor::image_from_icon;
+use crate::dnd::{DragOperation, PasteboardWriter};
 use crate::window::Window;
 
 #[derive(Debug)]
@@ -175,26 +179,95 @@ impl RootActiveEventLoop for ActiveEventLoop {
     fn start_drag(
         &self,
         source: WindowId,
-        _send_data: Box<dyn DataTransferSend>,
+        send_data: Box<dyn DataTransferSend>,
         _action_mask: &dyn DndActionMask,
-        _icon: Option<DragIcon>,
+        icon: Option<DragIcon>,
     ) -> Result<DataTransferId, RequestError> {
         self.app_state
-            .with_window_delegate_on_main(source, |delegate| {
-                #[expect(unreachable_code)]
-                delegate
-                    .view()
-                    .downcast::<NSView>()
-                    .ok()
-                    .unwrap()
-                    .beginDraggingSessionWithItems_event_source(todo!(), todo!(), todo!());
+            .with_window_delegate_on_main(source, move |delegate| {
+                let drag_image = icon.and_then(|icon| image_from_icon(&icon.icon).ok());
+
+                let mut uris = send_data
+                    .data_for_type(&TypeHint::UriList)
+                    .and_then(|file_uris| {
+                        // TODO: Might not be ideal to do this
+                        let ns_url_from_os_str =
+                            |os_str: OsString| Some(NSString::from_str(&os_str.to_str()?));
+                        // Slightly complicated use of iterators in order to ensure that branches
+                        // have the same opaque type
+                        match file_uris {
+                            SendData::Uris(os_strings) => Some(
+                                None.into_iter()
+                                    .chain(os_strings.into_iter().filter_map(ns_url_from_os_str)),
+                            ),
+                            SendData::String(string) => Some(
+                                Some(NSString::from_str(&string))
+                                    .into_iter()
+                                    .chain(Vec::new().into_iter().filter_map(ns_url_from_os_str)),
+                            ),
+                            SendData::Bytes(_) => None,
+                        }
+                    })
+                    .into_iter()
+                    .flatten();
+
+                let first_uri = uris.next();
+
+                let mut pasteboard_items = uris
+                    .map(|ns_url| {
+                        let dragging_item = NSDraggingItem::initWithPasteboardWriter(
+                            NSDraggingItem::alloc(),
+                            ProtocolObject::from_ref(&*ns_url),
+                        );
+
+                        unsafe {
+                            dragging_item.setDraggingFrame_contents(
+                                CGRect::new(CGPoint::ZERO, CGSize::new(16., 16.)),
+                                drag_image.as_ref().map(AsRef::as_ref),
+                            )
+                        };
+
+                        dragging_item
+                    })
+                    .collect::<Vec<_>>();
+
+                let first_dragging_item = NSDraggingItem::initWithPasteboardWriter(
+                    NSDraggingItem::alloc(),
+                    ProtocolObject::from_ref(&*PasteboardWriter::new(send_data, first_uri)),
+                );
+
+                unsafe {
+                    first_dragging_item.setDraggingFrame_contents(
+                        CGRect::new(CGPoint::ZERO, CGSize::new(16., 16.)),
+                        drag_image.as_ref().map(AsRef::as_ref),
+                    )
+                };
+
+                pasteboard_items.insert(0, first_dragging_item);
+
+                let pasteboard_items = NSArray::from_retained_slice(&pasteboard_items);
+
+                let view = delegate.view();
+                let Some(event) = view.latest_event() else {
+                    return Err(RequestError::Ignored);
+                };
+                let session = view.as_super().beginDraggingSessionWithItems_event_source(
+                    &pasteboard_items,
+                    &event,
+                    ProtocolObject::from_ref(&*delegate),
+                );
+
+                let id = DataTransferId::from_raw(session.draggingSequenceNumber() as i64);
+
+                view.set_dragging_session(session);
+
+                Ok(id)
             })
-            .ok_or(RequestError::Ignored)
+            .ok_or(RequestError::Ignored)?
     }
 
-    fn cancel_drag(&self, id: DataTransferId) -> Result<(), RequestError> {
-        let _ = id;
-        todo!()
+    fn cancel_drag(&self, _id: DataTransferId) -> Result<(), RequestError> {
+        Ok(())
     }
 }
 

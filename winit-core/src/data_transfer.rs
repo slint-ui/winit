@@ -286,10 +286,10 @@ impl From<Vec<OsString>> for SendData {
 /// See [`StartDrag`](crate::event_loop::StartDrag) for where this is used. To build an
 /// implementation of this trait dynamically in a cross-platform way, use
 /// [`DataTransferSendBuilder`].
-pub trait DataTransferSend: DataTransfer {
+pub trait DataTransferSend: DataTransfer + Send {
     /// Get the data for the specified type, or `None` if this value does not supply the given data
     /// type.
-    fn data_for_type(&mut self, type_: &dyn TransferType) -> Option<SendData>;
+    fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData>;
 
     /// If `true`, this data transfer is only valid for the application sending the data.
     ///
@@ -306,7 +306,7 @@ pub enum InternalTransferMarker {}
 /// Marker for a [`DataTransferSendBuilder`] which is external.
 pub enum ExternalTransferMarker {}
 
-type SendDataCallback<T> = Box<dyn Fn(&mut T, &dyn TransferType) -> Option<SendData>>;
+type SendDataCallback<T> = Box<dyn Fn(&T, &dyn TransferType) -> Option<SendData> + Send>;
 
 /// Dynamic builder for an implementation of [`DataTransferSend`].
 ///
@@ -322,7 +322,7 @@ type SendDataCallback<T> = Box<dyn Fn(&mut T, &dyn TransferType) -> Option<SendD
 /// it lazily to the requested type.
 pub struct DataTransferSendBuilder<T, M = ExternalTransferMarker> {
     state: T,
-    types: Vec<(Box<dyn TransferType>, SendDataCallback<T>)>,
+    types: Vec<(Box<dyn TransferType + Send>, SendDataCallback<T>)>,
     _is_internal: PhantomData<M>,
 }
 
@@ -338,7 +338,7 @@ where
 impl<T, M> DataTransfer for DataTransferSendBuilder<T, M>
 where
     M: 'static,
-    T: fmt::Debug + 'static,
+    T: fmt::Debug + Send + 'static,
 {
     fn for_each_available_type<'this>(
         &'this self,
@@ -350,9 +350,9 @@ where
 
 impl<T> DataTransferSend for DataTransferSendBuilder<T, ExternalTransferMarker>
 where
-    T: fmt::Debug + 'static,
+    T: fmt::Debug + Send + 'static,
 {
-    fn data_for_type(&mut self, type_: &dyn TransferType) -> Option<SendData> {
+    fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData> {
         self.data_for_type(type_)
     }
 
@@ -363,9 +363,9 @@ where
 
 impl<T> DataTransferSend for DataTransferSendBuilder<T, InternalTransferMarker>
 where
-    T: fmt::Debug + 'static,
+    T: fmt::Debug + Send + 'static,
 {
-    fn data_for_type(&mut self, type_: &dyn TransferType) -> Option<SendData> {
+    fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData> {
         self.data_for_type(type_)
     }
 
@@ -391,18 +391,18 @@ impl<T> DataTransferSendBuilder<T, InternalTransferMarker> {
 }
 
 impl<T, M> DataTransferSendBuilder<T, M> {
-    fn data_for_type(&mut self, type_: &dyn TransferType) -> Option<SendData> {
+    fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData> {
         let (_, func) = self.types.iter().find(|(ty, _)| ty.matches(type_))?;
 
-        func(&mut self.state, type_)
+        func(&self.state, type_)
     }
 
     /// Add a callback which converts the builder's state to the given type. In
     /// most cases, `type_` will be [`TypeHint`].
     pub fn add_type<Ty, F, O>(&mut self, type_: Ty, func: F) -> &mut Self
     where
-        Ty: TransferType,
-        F: Fn(&mut T, &dyn TransferType) -> Option<O> + 'static,
+        Ty: TransferType + Send,
+        F: Fn(&T, &dyn TransferType) -> Option<O> + Send + 'static,
         O: Into<SendData>,
     {
         self.types
@@ -422,8 +422,8 @@ impl<T, M> DataTransferSendBuilder<T, M> {
     ///   extension chosen by the receiving application.
     pub fn with_type<Ty, F, O>(mut self, type_: Ty, func: F) -> Self
     where
-        Ty: TransferType,
-        F: Fn(&mut T, &dyn TransferType) -> Option<O> + 'static,
+        Ty: TransferType + Send,
+        F: Fn(&T, &dyn TransferType) -> Option<O> + Send + 'static,
         O: Into<SendData>,
     {
         self.add_type(type_, func);

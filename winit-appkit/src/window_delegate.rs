@@ -19,12 +19,13 @@ use objc2::{
 use objc2_app_kit::{
     NSAppKitVersionNumber, NSAppKitVersionNumber10_12, NSAppearance, NSAppearanceCustomization,
     NSAppearanceNameAqua, NSApplication, NSApplicationPresentationOptions, NSBackingStoreType,
-    NSColor, NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSPasteboardTypeFileURL,
-    NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeSound, NSPasteboardTypeString,
-    NSPasteboardTypeTIFF, NSRequestUserAttentionType, NSScreen, NSToolbar, NSView,
-    NSViewFrameDidChangeNotification, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowLevel,
-    NSWindowOcclusionState, NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask,
-    NSWindowTabbingMode, NSWindowTitleVisibility, NSWindowToolbarStyle,
+    NSColor, NSDragOperation, NSDraggingContext, NSDraggingDestination, NSDraggingInfo,
+    NSDraggingSession, NSDraggingSource, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
+    NSPasteboardTypePNG, NSPasteboardTypeSound, NSPasteboardTypeString, NSPasteboardTypeTIFF,
+    NSRequestUserAttentionType, NSScreen, NSToolbar, NSView, NSViewFrameDidChangeNotification,
+    NSWindow, NSWindowButton, NSWindowDelegate, NSWindowLevel, NSWindowOcclusionState,
+    NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode,
+    NSWindowTitleVisibility, NSWindowToolbarStyle,
 };
 use objc2_core_foundation::{CGFloat, CGPoint};
 use objc2_core_graphics::{
@@ -357,6 +358,18 @@ define_class!(
                     self.window().setFrame_display(screen.frame(), true);
                 }
             }
+        }
+    }
+
+    unsafe impl NSDraggingSource for WindowDelegate {
+        #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
+        fn dragging_session_source_operation_mask(
+            &self,
+            _: &NSDraggingSession,
+            _: NSDraggingContext,
+        ) -> NSDragOperation {
+            // TODO: Set this from `start_drag`
+            NSDragOperation::all()
         }
     }
 

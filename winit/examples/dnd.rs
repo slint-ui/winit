@@ -1,8 +1,10 @@
 use std::error::Error;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use dpi::PhysicalPosition;
+use image::RgbImage;
 use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::data_transfer::{DataTransferId, DataTransferSendBuilder, TypeHint, TypedData};
@@ -32,6 +34,7 @@ struct Application {
     last_dnd_fetch: Option<Box<dyn TypedData>>,
     last_drag_start: Option<DataTransferId>,
     drag_icon: (Icon, PhysicalPosition<i32>),
+    drag_image_data: Arc<RgbImage>,
 }
 
 const DRAG_IMAGE: &[u8] = include_bytes!("data/icon.png");
@@ -39,8 +42,14 @@ const DRAG_IMAGE: &[u8] = include_bytes!("data/icon.png");
 impl Application {
     fn new() -> Self {
         let drag_icon = load_icon(DRAG_IMAGE);
-
-        Self { window: None, last_dnd_fetch: None, last_drag_start: None, drag_icon }
+        let drag_image_data = Arc::new(image::load_from_memory(DRAG_IMAGE).unwrap().into_rgb8());
+        Self {
+            window: None,
+            last_dnd_fetch: None,
+            last_drag_start: None,
+            drag_icon,
+            drag_image_data,
+        }
     }
 }
 
@@ -83,13 +92,24 @@ impl ApplicationHandler for Application {
 
                     let (icon, offset) = self.drag_icon.clone();
 
+                    // In a real application, you probably wouldn't advertise so many types.
+                    // Depending on platform and destination application, different options may be
+                    // chosen.
                     let result = event_loop.start_drag(
                         window_id,
-                        DataTransferSendBuilder::new(())
-                            .with_type(TypeHint::Plaintext, |(), _| {
+                        DataTransferSendBuilder::new(self.drag_image_data.clone())
+                            .with_type(TypeHint::UriList, |_, _| {
+                                let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                                let root = manifest_dir.parent().unwrap();
+                                let this_file = root.join(file!());
+                                let icon_file = this_file.parent().unwrap().join("data/icon.png");
+                                let icon_file = icon_file.display();
+                                Some(vec![OsString::from(format!("file://{icon_file}"))])
+                            })
+                            .with_type(TypeHint::Plaintext, |_, _| {
                                 Some("Winit example".to_string())
                             })
-                            .with_type(TypeHint::Html, |(), _| {
+                            .with_type(TypeHint::Html, |_, _| {
                                 Some("<span><strong>Winit</strong> example</span>".to_string())
                             })
                             // You can advertise a `TypeHint` that can match many types, and switch
@@ -97,20 +117,14 @@ impl ApplicationHandler for Application {
                             // This may be desirable on some platforms
                             // which restrict the set of image types
                             // that can be sent.
-                            .with_type(TypeHint::Image { extension_hint: None }, |(), ty| {
+                            .with_type(TypeHint::Image { extension_hint: None }, |image, ty| {
                                 let hint = ty.hint()?;
                                 match hint {
-                                    TypeHint::Image { extension_hint: None | Some("png") } => {
-                                        info!("Destination requested image as png");
-                                        Some(DRAG_IMAGE.to_vec())
-                                    },
-                                    TypeHint::Image { extension_hint: Some(ext) } => {
+                                    TypeHint::Image { extension_hint } => {
+                                        let ext = extension_hint.unwrap_or("png");
                                         info!(
                                             "Destination requested image as {ext}, converting..."
                                         );
-                                        let image = image::load_from_memory(DRAG_IMAGE)
-                                            .unwrap()
-                                            .into_rgb8();
                                         let format = image::ImageFormat::from_extension(ext)?;
                                         let mut out_buf = Vec::new();
                                         let mut out_writer = std::io::Cursor::new(&mut out_buf);
@@ -121,14 +135,6 @@ impl ApplicationHandler for Application {
                                     },
                                     _ => None,
                                 }
-                            })
-                            .with_type(TypeHint::UriList, |(), _| {
-                                let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-                                let root = manifest_dir.parent().unwrap();
-                                let this_file = root.join(file!());
-                                let icon_file = this_file.parent().unwrap().join("data/icon.png");
-                                let icon_file = icon_file.display();
-                                Some(vec![OsString::from(format!("file://{icon_file}"))])
                             })
                             .build(),
                         &DndActions::All,

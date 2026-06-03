@@ -6,10 +6,10 @@ use std::rc::Rc;
 use dpi::{LogicalPosition, LogicalSize};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
-use objc2::{AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSCursor, NSEvent, NSEventPhase, NSResponder, NSTextInputClient, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow,
+    NSApplication, NSCursor, NSDraggingSession, NSEvent, NSEventPhase, NSResponder,
+    NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
 };
 use objc2_core_foundation::CGRect;
 use objc2_foundation::{
@@ -113,6 +113,13 @@ fn get_left_modifier_code(key: &Key) -> KeyCode {
 pub struct ViewState {
     /// Strong reference to the global application state.
     app_state: Rc<AppState>,
+
+    /// Initiating a drag requires passing the mouse event that initiated it.
+    /// Since we don't handle these events synchronously, we need to retain the
+    /// event internally.
+    latest_mouse_event: RefCell<Option<Retained<NSEvent>>>,
+    /// This is for a dragging session that we initiated
+    dragging_session: RefCell<Option<Retained<NSDraggingSession>>>,
 
     cursor_state: RefCell<CursorState>,
     ime_position: Cell<NSPoint>,
@@ -780,6 +787,8 @@ impl WinitView {
     ) -> Retained<Self> {
         let this = mtm.alloc().set_ivars(ViewState {
             app_state: Rc::clone(app_state),
+            latest_mouse_event: Default::default(),
+            dragging_session: Default::default(),
             cursor_state: Default::default(),
             ime_position: Default::default(),
             ime_size: Default::default(),
@@ -1073,7 +1082,28 @@ impl WinitView {
         self.queue_event(WindowEvent::ModifiersChanged(self.ivars().modifiers.get()));
     }
 
+    pub(crate) fn set_dragging_session(&self, drag: Retained<NSDraggingSession>) {
+        self.ivars().dragging_session.replace(Some(drag));
+    }
+
+    pub(crate) fn clear_dragging_session(&self) -> bool {
+        self.ivars().dragging_session.replace(None).is_some()
+    }
+
+    fn update_latest_event(&self, event: &NSEvent) {
+        self.ivars().latest_mouse_event.replace(Some(event.retain()));
+    }
+
+    pub(crate) fn latest_event(&self) -> Option<Retained<NSEvent>> {
+        self.ivars().latest_mouse_event.borrow().clone()
+    }
+
     fn mouse_click(&self, event: &NSEvent, button_state: ElementState) {
+        // Initiating a drag requires us to pass a mouse down event.
+        if button_state == ElementState::Pressed {
+            self.update_latest_event(event);
+        }
+
         let position = self.mouse_view_point(event).to_physical(self.scale_factor());
         let button = mouse_button(event);
 

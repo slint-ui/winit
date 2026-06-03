@@ -2,17 +2,21 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
-use std::ops::Deref;
+use std::ops::{ControlFlow, Deref};
 use std::rc::Rc;
 
-use objc2::Message;
 use objc2::rc::{Retained, Weak};
+use objc2::runtime::AnyObject;
+use objc2::{AnyThread, DefinedClass as _, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSDragOperation, NSPasteboard, NSPasteboardType, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
     NSPasteboardTypePNG, NSPasteboardTypeSound, NSPasteboardTypeString, NSPasteboardTypeTIFF,
+    NSPasteboardWriting, NSPasteboardWritingOptions,
 };
-use objc2_foundation::{NSArray, NSData, NSString};
-use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypeHint, TypedData};
+use objc2_foundation::{NSArray, NSData, NSObject, NSObjectProtocol, NSString};
+use winit_core::data_transfer::{
+    DataTransfer, DataTransferId, DataTransferSend, SendData, TransferType, TypeHint, TypedData,
+};
 use winit_core::event_loop::{DndActionMask, DndActions};
 
 /// A thin wrapper around [`NSPasteboardType`], implementing [`TransferType`].
@@ -392,3 +396,119 @@ impl Pasteboards {
         self.inner.borrow().get(&id).and_then(|weak| weak.load()).map(|pb| Pasteboard::new(id, pb))
     }
 }
+
+pub(crate) struct PasteboardWriterState {
+    data: Box<dyn DataTransferSend>,
+    // The macOS drag-and-drop API has some confusing aspects when handling multi-drag. The best
+    // we can really do is have the first element contain all the cross-platform items, and
+    // any further items are file paths only.
+    uri: Option<Retained<NSString>>,
+    writeable_types: Retained<NSArray<NSPasteboardType>>,
+}
+
+impl PasteboardWriter {
+    pub(crate) fn new(
+        value: Box<dyn DataTransferSend>,
+        uri: Option<Retained<NSString>>,
+    ) -> Retained<Self> {
+        let mut writeable_types = Vec::<Retained<NSPasteboardType>>::new();
+        value.for_each_available_type(&mut |type_| {
+            let Some(spec) = PasteboardTypeSpec::from_dyn(type_) else {
+                return ControlFlow::Continue(());
+            };
+
+            let Some(pb_type) = spec.pasteboard_type() else {
+                return ControlFlow::Continue(());
+            };
+
+            writeable_types.push((**pb_type).clone());
+
+            ControlFlow::Continue(())
+        });
+
+        let pb_writer = Self::alloc().set_ivars(PasteboardWriterState {
+            data: value,
+            uri,
+            writeable_types: NSArray::from_retained_slice(&writeable_types),
+        });
+
+        // Unsure if there's an easier way to do this, but this is how `WindowDelegate` does it.
+        unsafe { msg_send![super(pb_writer), init] }
+    }
+}
+
+impl PasteboardWriterState {
+    fn data_for_pasteboard_type(
+        &self,
+        pasteboard_type: &NSPasteboardType,
+    ) -> Option<Retained<AnyObject>> {
+        if pasteboard_type == unsafe { NSPasteboardTypeFileURL } {
+            if let Some(out) = self.uri.clone().map(Into::into) {
+                return Some(out);
+            }
+        }
+        let pb_type = PasteboardType::from(pasteboard_type.retain());
+
+        let mut out = None;
+
+        self.data.for_each_available_type(&mut |haystack| {
+            if haystack.matches(&pb_type) {
+                out = self.data.data_for_type(haystack);
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+
+        match out? {
+            // This should be handled separately
+            // TODO: Is there a better way to do this?
+            SendData::Uris(_) => None,
+            SendData::String(string) => Some(NSString::from_str(&string).into()),
+            SendData::Bytes(binary) => Some(NSData::from_vec(binary).into()),
+        }
+    }
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = AnyThread]
+    #[name = "WinitPasteboardWriter"]
+    #[ivars = PasteboardWriterState]
+    pub(crate) struct PasteboardWriter;
+
+    unsafe impl NSObjectProtocol for PasteboardWriter {}
+
+    unsafe impl NSPasteboardWriting for PasteboardWriter {
+        #[unsafe(method_id(writableTypesForPasteboard:))]
+        fn writable_types_for_pasteboard(
+            &self,
+            pasteboard: &NSPasteboard,
+        ) -> Retained<NSArray<NSPasteboardType>> {
+            let vars = self.ivars();
+            vars.writeable_types.clone()
+        }
+
+        #[unsafe(method(writingOptionsForType:pasteboard:))]
+        fn writing_options_for_type(
+            &self,
+            type_: &NSPasteboardType,
+            pasteboard: &NSPasteboard,
+        ) -> NSPasteboardWritingOptions {
+            let _ = type_;
+            let _ = pasteboard;
+            // TODO: Not necessarily ideal to always use `Promised`, but
+            // it's good enough for now.
+            NSPasteboardWritingOptions::empty()
+        }
+
+        #[unsafe(method_id(pasteboardPropertyListForType:))]
+        fn pasteboard_property_list_for_type(
+            &self,
+            type_: &NSPasteboardType,
+        ) -> Option<Retained<AnyObject>> {
+            let vars = self.ivars();
+            vars.data_for_pasteboard_type(type_)
+        }
+    }
+);
