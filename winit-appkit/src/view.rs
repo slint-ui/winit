@@ -114,10 +114,6 @@ pub struct ViewState {
     /// Strong reference to the global application state.
     app_state: Rc<AppState>,
 
-    /// Initiating a drag requires passing the mouse event that initiated it.
-    /// Since we don't handle these events synchronously, we need to retain the
-    /// event internally.
-    latest_mouse_event: RefCell<Option<Retained<NSEvent>>>,
     /// This is for a dragging session that we initiated
     dragging_session: RefCell<Option<Retained<NSDraggingSession>>>,
 
@@ -787,7 +783,6 @@ impl WinitView {
     ) -> Retained<Self> {
         let this = mtm.alloc().set_ivars(ViewState {
             app_state: Rc::clone(app_state),
-            latest_mouse_event: Default::default(),
             dragging_session: Default::default(),
             cursor_state: Default::default(),
             ime_position: Default::default(),
@@ -863,7 +858,7 @@ impl WinitView {
         });
     }
 
-    fn scale_factor(&self) -> f64 {
+    pub(crate) fn scale_factor(&self) -> f64 {
         self.window().backingScaleFactor() as f64
     }
 
@@ -1090,20 +1085,7 @@ impl WinitView {
         self.ivars().dragging_session.replace(None).is_some()
     }
 
-    fn update_latest_event(&self, event: &NSEvent) {
-        self.ivars().latest_mouse_event.replace(Some(event.retain()));
-    }
-
-    pub(crate) fn latest_event(&self) -> Option<Retained<NSEvent>> {
-        self.ivars().latest_mouse_event.borrow().clone()
-    }
-
     fn mouse_click(&self, event: &NSEvent, button_state: ElementState) {
-        // Initiating a drag requires us to pass a mouse down event.
-        if button_state == ElementState::Pressed {
-            self.update_latest_event(event);
-        }
-
         let position = self.mouse_view_point(event).to_physical(self.scale_factor());
         let button = mouse_button(event);
 

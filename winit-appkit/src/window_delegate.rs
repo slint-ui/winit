@@ -400,7 +400,10 @@ define_class!(
                 position: Some(position),
             });
 
-            valid_operations
+            vars.app_state
+                .drag_state()
+                .get()
+                .map_or(NSDragOperation::empty(), |state| state.valid_operations.0)
         }
 
         #[unsafe(method(wantsPeriodicDraggingUpdates))]
@@ -434,7 +437,10 @@ define_class!(
 
             self.queue_event(WindowEvent::DragPosition { id: transfer_id, position });
 
-            valid_operations.0
+            vars.app_state
+                .drag_state()
+                .get()
+                .map_or(NSDragOperation::empty(), |state| state.valid_operations.0)
         }
 
         /// Invoked when the image is released
@@ -469,7 +475,13 @@ define_class!(
             self.queue_event(WindowEvent::DragPosition { id: transfer_id, position });
             self.queue_event(WindowEvent::DragDropped { id: transfer_id });
 
-            sender.draggingSourceOperationMask().intersects(valid_operations.0)
+            let valid_operations = vars
+                .app_state
+                .drag_state()
+                .get()
+                .map_or(NSDragOperation::empty(), |state| state.valid_operations.0);
+
+            sender.draggingSourceOperationMask().intersects(valid_operations)
         }
 
         /// Invoked when the dragging operation is complete

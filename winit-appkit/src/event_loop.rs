@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dpi::PhysicalPosition;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread, ClassType, MainThreadMarker, available};
@@ -14,7 +15,7 @@ use objc2_app_kit::{
 use objc2_core_foundation::{
     CFIndex, CFRunLoopActivity, CGPoint, CGRect, CGSize, kCFRunLoopCommonModes,
 };
-use objc2_foundation::{NSArray, NSNotificationCenter, NSObjectProtocol, NSString};
+use objc2_foundation::{NSArray, NSNotificationCenter, NSObjectProtocol, NSPoint, NSString};
 use rwh_06::HasDisplayHandle;
 use tracing::debug_span;
 use winit_common::core_foundation::{MainRunLoop, MainRunLoopObserver, tracing_observers};
@@ -185,7 +186,27 @@ impl RootActiveEventLoop for ActiveEventLoop {
     ) -> Result<DataTransferId, RequestError> {
         self.app_state
             .with_window_delegate_on_main(source, move |delegate| {
+                let dragging_rect_offset =
+                    icon.as_ref().map(|icon| icon.offset).unwrap_or_default();
                 let drag_image = icon.and_then(|icon| image_from_icon(&icon.icon).ok());
+
+                let Some(event) = dbg!(delegate.window().currentEvent()) else {
+                    return Err(RequestError::Ignored);
+                };
+
+                let dragging_rect_size = drag_image
+                    .as_ref()
+                    .map(|img| img.size())
+                    // Seemingly we need some kind of dragging rectangle even if no icon is
+                    // supplied.
+                    .unwrap_or(CGSize::new(16., 16.));
+
+                let event_location = event.locationInWindow();
+                let dragging_rect_location = CGPoint::new(
+                    event_location.x + dragging_rect_offset.x as f64,
+                    event_location.y + dragging_rect_offset.y as f64,
+                );
+                let dragging_rect = CGRect::new(dragging_rect_location, dragging_rect_size);
 
                 let mut uris = send_data
                     .data_for_type(&TypeHint::UriList)
@@ -220,12 +241,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
                             ProtocolObject::from_ref(&*ns_url),
                         );
 
-                        unsafe {
-                            dragging_item.setDraggingFrame_contents(
-                                CGRect::new(CGPoint::ZERO, CGSize::new(16., 16.)),
-                                drag_image.as_ref().map(AsRef::as_ref),
-                            )
-                        };
+                        // No dragging frame/contents, icon only applies to the first item.
 
                         dragging_item
                     })
@@ -238,7 +254,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
                 unsafe {
                     first_dragging_item.setDraggingFrame_contents(
-                        CGRect::new(CGPoint::ZERO, CGSize::new(16., 16.)),
+                        dragging_rect,
                         drag_image.as_ref().map(AsRef::as_ref),
                     )
                 };
@@ -247,11 +263,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
                 let pasteboard_items = NSArray::from_retained_slice(&pasteboard_items);
 
-                let view = delegate.view();
-                let Some(event) = view.latest_event() else {
-                    return Err(RequestError::Ignored);
-                };
-                let session = view.as_super().beginDraggingSessionWithItems_event_source(
+                let session = delegate.window().beginDraggingSessionWithItems_event_source(
                     &pasteboard_items,
                     &event,
                     ProtocolObject::from_ref(&*delegate),
@@ -259,7 +271,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
                 let id = DataTransferId::from_raw(session.draggingSequenceNumber() as i64);
 
-                view.set_dragging_session(session);
+                delegate.view().set_dragging_session(session);
 
                 Ok(id)
             })
