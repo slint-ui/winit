@@ -4,10 +4,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dpi::PhysicalPosition;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
-use objc2::{AnyThread, ClassType, MainThreadMarker, available};
+use objc2::{AnyThread, MainThreadMarker, available};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDidFinishLaunchingNotification,
     NSApplicationWillTerminateNotification, NSDraggingItem, NSWindow,
@@ -15,7 +14,7 @@ use objc2_app_kit::{
 use objc2_core_foundation::{
     CFIndex, CFRunLoopActivity, CGPoint, CGRect, CGSize, kCFRunLoopCommonModes,
 };
-use objc2_foundation::{NSArray, NSNotificationCenter, NSObjectProtocol, NSPoint, NSString};
+use objc2_foundation::{NSArray, NSNotificationCenter, NSObjectProtocol, NSString};
 use rwh_06::HasDisplayHandle;
 use tracing::debug_span;
 use winit_common::core_foundation::{MainRunLoop, MainRunLoopObserver, tracing_observers};
@@ -190,7 +189,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
                     icon.as_ref().map(|icon| icon.offset).unwrap_or_default();
                 let drag_image = icon.and_then(|icon| image_from_icon(&icon.icon).ok());
 
-                let Some(event) = dbg!(delegate.window().currentEvent()) else {
+                let Some(event) = delegate.window().currentEvent() else {
                     return Err(RequestError::Ignored);
                 };
 
@@ -213,7 +212,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
                     .and_then(|file_uris| {
                         // TODO: Might not be ideal to do this
                         let ns_url_from_os_str =
-                            |os_str: OsString| Some(NSString::from_str(&os_str.to_str()?));
+                            |os_str: OsString| Some(NSString::from_str(os_str.to_str()?));
                         // Slightly complicated use of iterators in order to ensure that branches
                         // have the same opaque type
                         match file_uris {

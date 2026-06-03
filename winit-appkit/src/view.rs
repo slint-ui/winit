@@ -6,7 +6,7 @@ use std::rc::Rc;
 use dpi::{LogicalPosition, LogicalSize};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
-use objc2::{AnyThread, DefinedClass, MainThreadMarker, Message, define_class, msg_send};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSCursor, NSDraggingSession, NSEvent, NSEventPhase, NSResponder,
     NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
@@ -1081,8 +1081,11 @@ impl WinitView {
         self.ivars().dragging_session.replace(Some(drag));
     }
 
-    pub(crate) fn clear_dragging_session(&self) -> bool {
-        self.ivars().dragging_session.replace(None).is_some()
+    pub(crate) fn clear_dragging_session(&self, drag: &NSDraggingSession) -> bool {
+        let mut dragging_session = self.ivars().dragging_session.borrow_mut();
+        dragging_session
+            .take_if(|session| session.draggingSequenceNumber() == drag.draggingSequenceNumber())
+            .is_some()
     }
 
     fn mouse_click(&self, event: &NSEvent, button_state: ElementState) {

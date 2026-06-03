@@ -371,6 +371,16 @@ define_class!(
             // TODO: Set this from `start_drag`
             NSDragOperation::all()
         }
+
+        #[unsafe(method(draggingSession:endedAtPoint:operation:))]
+        fn dragging_session_ended_at_point(
+            &self,
+            session: &NSDraggingSession,
+            _: NSPoint,
+            _: NSDragOperation,
+        ) {
+            self.view().clear_dragging_session(session);
+        }
     }
 
     unsafe impl NSDraggingDestination for WindowDelegate {
@@ -420,9 +430,7 @@ define_class!(
 
             let vars = self.ivars();
 
-            let Some(DragState { id: transfer_id, valid_operations }) =
-                vars.app_state.drag_state().get()
-            else {
+            let Some(DragState { id: transfer_id, .. }) = vars.app_state.drag_state().get() else {
                 return NSDragOperation::empty();
             };
 
@@ -457,9 +465,7 @@ define_class!(
 
             let vars = self.ivars();
 
-            let Some(DragState { id: transfer_id, valid_operations }) =
-                vars.app_state.drag_state().get()
-            else {
+            let Some(DragState { id: transfer_id, .. }) = vars.app_state.drag_state().get() else {
                 return false.into();
             };
 

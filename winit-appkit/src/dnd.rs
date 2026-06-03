@@ -403,7 +403,7 @@ pub(crate) struct PasteboardWriterState {
     // we can really do is have the first element contain all the cross-platform items, and
     // any further items are file paths only.
     uri: Option<Retained<NSString>>,
-    writeable_types: Retained<NSArray<NSPasteboardType>>,
+    writable_types: Retained<NSArray<NSPasteboardType>>,
 }
 
 impl PasteboardWriter {
@@ -411,7 +411,7 @@ impl PasteboardWriter {
         value: Box<dyn DataTransferSend>,
         uri: Option<Retained<NSString>>,
     ) -> Retained<Self> {
-        let mut writeable_types = Vec::<Retained<NSPasteboardType>>::new();
+        let mut writable_types = Vec::<Retained<NSPasteboardType>>::new();
         value.for_each_available_type(&mut |type_| {
             let Some(spec) = PasteboardTypeSpec::from_dyn(type_) else {
                 return ControlFlow::Continue(());
@@ -421,7 +421,7 @@ impl PasteboardWriter {
                 return ControlFlow::Continue(());
             };
 
-            writeable_types.push((**pb_type).clone());
+            writable_types.push((**pb_type).clone());
 
             ControlFlow::Continue(())
         });
@@ -429,7 +429,7 @@ impl PasteboardWriter {
         let pb_writer = Self::alloc().set_ivars(PasteboardWriterState {
             data: value,
             uri,
-            writeable_types: NSArray::from_retained_slice(&writeable_types),
+            writable_types: NSArray::from_retained_slice(&writable_types),
         });
 
         // Unsure if there's an easier way to do this, but this is how `WindowDelegate` does it.
@@ -486,7 +486,7 @@ define_class!(
             pasteboard: &NSPasteboard,
         ) -> Retained<NSArray<NSPasteboardType>> {
             let vars = self.ivars();
-            vars.writeable_types.clone()
+            vars.writable_types.clone()
         }
 
         #[unsafe(method(writingOptionsForType:pasteboard:))]

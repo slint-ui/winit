@@ -118,9 +118,7 @@ impl AppState {
         F: FnOnce(Retained<WindowDelegate>) -> R + Send,
         R: Send,
     {
-        self.windows.borrow_mut().get(&id)?.get_on_main(move |delegate| {
-            if let Some(delegate) = delegate.load() { Some(func(delegate)) } else { None }
-        })
+        self.windows.borrow_mut().get(&id)?.get_on_main(move |delegate| delegate.load().map(func))
     }
 
     pub fn new_window(&self, window: &Retained<WindowDelegate>, mtm: MainThreadMarker) {
