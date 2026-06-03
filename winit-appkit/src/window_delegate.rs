@@ -368,8 +368,7 @@ define_class!(
             _: &NSDraggingSession,
             _: NSDraggingContext,
         ) -> NSDragOperation {
-            // TODO: Set this from `start_drag`
-            NSDragOperation::all()
+            self.view().drag_operations().0
         }
 
         #[unsafe(method(draggingSession:endedAtPoint:operation:))]

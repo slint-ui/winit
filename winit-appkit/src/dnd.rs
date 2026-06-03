@@ -193,6 +193,11 @@ impl PasteboardTypeSpec {
 pub struct DragOperation(pub NSDragOperation);
 
 impl DragOperation {
+    /// An empty set of drag operations
+    pub fn empty() -> Self {
+        Self(NSDragOperation::empty())
+    }
+
     pub(crate) fn from_dyn(actions: &dyn DndActionMask) -> Self {
         if let Some(op) = actions.cast_ref::<Self>() {
             *op

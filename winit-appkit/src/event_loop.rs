@@ -180,9 +180,11 @@ impl RootActiveEventLoop for ActiveEventLoop {
         &self,
         source: WindowId,
         send_data: Box<dyn DataTransferSend>,
-        _action_mask: &dyn DndActionMask,
+        action_mask: &dyn DndActionMask,
         icon: Option<DragIcon>,
     ) -> Result<DataTransferId, RequestError> {
+        let drag_operation = DragOperation::from_dyn(action_mask);
+
         self.app_state
             .with_window_delegate_on_main(source, move |delegate| {
                 let dragging_rect_offset =
@@ -270,7 +272,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
                 let id = DataTransferId::from_raw(session.draggingSequenceNumber() as i64);
 
-                delegate.view().set_dragging_session(session);
+                delegate.view().set_dragging_session(session, drag_operation);
 
                 Ok(id)
             })
