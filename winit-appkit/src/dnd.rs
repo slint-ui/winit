@@ -483,7 +483,7 @@ define_class!(
         #[unsafe(method_id(writableTypesForPasteboard:))]
         fn writable_types_for_pasteboard(
             &self,
-            pasteboard: &NSPasteboard,
+            _: &NSPasteboard,
         ) -> Retained<NSArray<NSPasteboardType>> {
             let vars = self.ivars();
             vars.writable_types.clone()
