@@ -110,9 +110,8 @@ impl ApplicationHandler for Application {
                             })
                             // You can advertise a `TypeHint` that can match many types, and switch
                             // inside the callback. For example, this will match any image type.
-                            // This may be desirable on some platforms
-                            // which restrict the set of image types
-                            // that can be sent.
+                            // This may be desirable on some platforms which restrict the set of
+                            // image types that can be sent.
                             .with_type(TypeHint::Image { extension_hint: None }, |image, ty| {
                                 let hint = ty.hint()?;
                                 match hint {
