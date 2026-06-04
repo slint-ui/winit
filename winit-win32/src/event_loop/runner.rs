@@ -29,6 +29,15 @@ pub(super) struct DragState {
     pub(super) actions: DndActions,
 }
 
+/// Set while `DoDragDrop` is on the call stack - i.e., this process is the source of an active
+/// drag. The target-side `IDropTarget` checks this to recognize self-drops and reuse the source's
+/// id + allowed actions instead of waiting for the (buffered) app `DragEntered` handler.
+#[derive(Copy, Clone)]
+pub(crate) struct SourceDrag {
+    pub(crate) id: DataTransferId,
+    pub(crate) allowed_actions: DndActions,
+}
+
 pub(crate) struct EventLoopRunner {
     pub(super) thread_id: u32,
 
@@ -50,6 +59,17 @@ pub(crate) struct EventLoopRunner {
     /// The currently in-flight drag transfer, if any, alive between `DragEntered` and
     /// `DragLeft`/`DragDropped`.
     pub(super) drag_state: RefCell<Option<DragState>>,
+
+    /// `Some(_)` while `start_drag` has `DoDragDrop` on the call stack.
+    pub(crate) source_drag: Cell<Option<SourceDrag>>,
+
+    /// For self-drops, target-side `IDropTarget::Drop` can't release the cached `DragState`
+    /// before its `DragDropped` `WindowEvent` is delivered - the event is buffered (the outer app
+    /// handler holds `event_handler` for the duration of `DoDragDrop`) and `data_transfer(id)`
+    /// would return `UnknownDataTransfer` if cleanup ran synchronously. So we stash the id here
+    /// and drain it at the end of `dispatch_buffered_events`, after the app's buffered handler
+    /// has had its chance to read the data.
+    pending_source_drag_cleanup: Cell<Option<DataTransferId>>,
 
     panic_error: Cell<Option<PanicError>>,
 }
@@ -102,11 +122,22 @@ impl EventLoopRunner {
             event_handler: Rc::new(Cell::new(None)),
             event_buffer: RefCell::new(VecDeque::new()),
             drag_state: RefCell::new(None),
+            source_drag: Cell::new(None),
+            pending_source_drag_cleanup: Cell::new(None),
         }
     }
 
-    pub(crate) fn register_data_transfer(&self, id: DataTransferId, data: Rc<DataObject>) {
-        *self.drag_state.borrow_mut() = Some(DragState { id, data, actions: DndActions::none() });
+    pub(crate) fn defer_source_drag_cleanup(&self, id: DataTransferId) {
+        self.pending_source_drag_cleanup.set(Some(id));
+    }
+
+    pub(crate) fn register_data_transfer(
+        &self,
+        id: DataTransferId,
+        data: Rc<DataObject>,
+        actions: DndActions,
+    ) {
+        *self.drag_state.borrow_mut() = Some(DragState { id, data, actions });
     }
 
     pub(crate) fn remove_data_transfer(&self, id: DataTransferId) {
@@ -179,6 +210,8 @@ impl EventLoopRunner {
             event_handler,
             event_buffer: _,
             drag_state,
+            source_drag,
+            pending_source_drag_cleanup,
         } = self;
         interrupt_msg_dispatch.set(false);
         runner_state.set(RunnerState::Uninitialized);
@@ -186,6 +219,8 @@ impl EventLoopRunner {
         exit.set(None);
         event_handler.set(None);
         *drag_state.borrow_mut() = None;
+        source_drag.set(None);
+        pending_source_drag_cleanup.set(None);
     }
 }
 
@@ -326,6 +361,11 @@ impl EventLoopRunner {
                 },
                 None => break,
             }
+        }
+        // The app's buffered `DragDropped` handler (if any) has now had its chance to call
+        // `data_transfer(id)`; safe to release the cached `DragState` for a deferred self-drop.
+        if let Some(id) = self.pending_source_drag_cleanup.take() {
+            self.remove_data_transfer(id);
         }
     }
 

@@ -13,13 +13,16 @@ use std::{fmt, mem, panic, ptr};
 
 use dpi::{PhysicalPosition, PhysicalSize};
 use windows_sys::Win32::Foundation::{
-    FALSE, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_FAILED, WPARAM,
+    DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FALSE, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT,
+    RECT, WAIT_FAILED, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromRect, MonitorFromWindow,
     RDW_INTERNALPAINT, RedrawWindow, SC_SCREENSAVE, ScreenToClient, ValidateRect,
 };
-use windows_sys::Win32::System::Ole::RevokeDragDrop;
+use windows_sys::Win32::System::Ole::{
+    DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE, DoDragDrop, RevokeDragDrop,
+};
 use windows_sys::Win32::System::Threading::{
     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, GetCurrentThreadId, INFINITE,
     SetWaitableTimer, TIMER_ALL_ACCESS,
@@ -63,7 +66,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{CustomCursor, CustomCursorSource};
-use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypedData};
+use winit_core::data_transfer::{
+    DataTransfer, DataTransferId, DataTransferSend, TransferType, TypedData,
+};
 use winit_core::error::{EventLoopError, NotSupportedError, RequestError};
 use winit_core::event::{
     DeviceEvent, DeviceId, FingerId, Force, Ime, RawKeyEvent, SurfaceSizeWriter, TabletToolButton,
@@ -71,7 +76,7 @@ use winit_core::event::{
 };
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask,
+    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask, DragIcon,
     EventLoopProxy as RootEventLoopProxy, EventLoopProxyProvider,
     OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
@@ -83,8 +88,9 @@ pub(super) use self::runner::{Event, EventLoopRunner};
 use super::SelectedCursor;
 use super::window::set_skip_taskbar;
 use crate::dark_mode::try_theme;
-use crate::dnd::{FileDropHandler, WinDataTransfer, WinTypedData};
+use crate::dnd::{DropSource, FileDropHandler, SourceDataObject, WinDataTransfer, WinTypedData};
 use crate::dpi::{become_dpi_aware, dpi_to_scale_factor};
+use crate::event_loop::runner::SourceDrag;
 use crate::icon::WinCursor;
 use crate::ime::ImeContext;
 use crate::keyboard::KeyEventBuilder;
@@ -512,6 +518,90 @@ impl RootActiveEventLoop for ActiveEventLoop {
         };
         state.actions = actions.hint();
         Ok(())
+    }
+
+    fn start_drag(
+        &self,
+        _source: WindowId,
+        send_data: Box<dyn DataTransferSend>,
+        action_mask: &dyn DndActionMask,
+        icon: Option<DragIcon>,
+    ) -> Result<DataTransferId, RequestError> {
+        let allowed_actions = action_mask.hint();
+        let allowed_effects = crate::dnd::actions_to_dropeffect_mask(allowed_actions);
+        // Win32 would happily run a modal `DoDragDrop` with `allowed_effects == 0`, but every
+        // target would see "no action allowed" and the drag would end in a guaranteed cancel
+        // after burning a full modal pump. Fail fast instead - the caller asked for a drag
+        // they explicitly refuse to allow.
+        if allowed_effects == 0 {
+            return Err(
+                NotSupportedError::new("start_drag called with an empty action mask").into()
+            );
+        }
+
+        let id = crate::dnd::next_data_transfer_id();
+        let data_object = SourceDataObject::new(send_data);
+        let drop_source = DropSource::new();
+
+        // Attach a drag preview if the app supplied one. Cosmetic failures must not abort the
+        // drag - the gesture still works, just without a custom image - so log and move on.
+        if let Some(icon) = icon {
+            if let Some(rgba) = icon.icon.cast_ref::<winit_core::icon::RgbaIcon>() {
+                let result = unsafe {
+                    crate::dnd::apply_drag_image(
+                        data_object.interface_ptr() as *mut _,
+                        rgba.width(),
+                        rgba.height(),
+                        rgba.buffer(),
+                        icon.offset,
+                    )
+                };
+                if let Err(hr) = result {
+                    tracing::warn!("Failed to attach drag image: hr=0x{hr:08x}");
+                }
+            } else {
+                tracing::warn!("DragIcon::icon must be an RgbaIcon on win32; ignoring");
+            }
+        }
+
+        // Make the drag visible to our own target-side `IDropTarget` so it can recognize
+        // self-drops and reuse this id + action mask without going through the (buffered) app
+        // handler. The guard ensures the flag is cleared on any exit path - if anything between
+        // here and `DoDragDrop`'s return panics, the stale flag would otherwise permanently
+        // disable `WM_PAINT` dispatch and misclassify all future external drags as self-drops.
+        struct ClearOnDrop<'a>(&'a Cell<Option<SourceDrag>>);
+        impl Drop for ClearOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.set(None);
+            }
+        }
+        self.0.source_drag.set(Some(SourceDrag { id, allowed_actions }));
+        let _guard = ClearOnDrop(&self.0.source_drag);
+
+        let mut effect_out: u32 = DROPEFFECT_NONE;
+        let hr = unsafe {
+            DoDragDrop(
+                data_object.interface_ptr(),
+                drop_source.interface_ptr(),
+                allowed_effects,
+                &mut effect_out,
+            )
+        };
+
+        // Both `DRAGDROP_S_DROP` and `DRAGDROP_S_CANCEL` are success codes for us - the app
+        // will hear about the outcome via the buffered `DragDropped`/`DragLeft` events
+        // (target-side translates `effect_out == DROPEFFECT_NONE` to `DragLeft`).
+        // Log the negotiated effect so cross-process drops, which have no target-side event
+        // in this process, leave a debuggable trace of what action the remote target performed.
+        if hr == DRAGDROP_S_DROP || hr == DRAGDROP_S_CANCEL {
+            tracing::trace!(
+                "DoDragDrop completed: hr=0x{hr:08x} effect_out={effect_out} \
+                 (COPY={DROPEFFECT_COPY}, MOVE={DROPEFFECT_MOVE}, LINK={DROPEFFECT_LINK})",
+            );
+            Ok(id)
+        } else {
+            Err(os_error!(std::io::Error::other(format!("DoDragDrop failed: 0x{hr:08x}"))).into())
+        }
     }
 }
 
@@ -1225,6 +1315,14 @@ unsafe fn public_window_callback_inner(
             result = ProcResult::Value(0);
         },
 
+        WM_PAINT if userdata.event_loop_runner.source_drag.get().is_some() => {
+            // While a source-side drag is in flight, the app handler is on the stack (we're
+            // inside `start_drag` -> `DoDragDrop`), so we can neither dispatch `RedrawRequested`
+            // nor keep re-arming via `RDW_INTERNALPAINT` (that would spin in OLE's modal loop).
+            // Let `DefWindowProcW` validate the region and show stale content for the duration of
+            // the drag; the next real paint happens once `DoDragDrop` returns.
+            result = ProcResult::Value(unsafe { DefWindowProcW(window, msg, wparam, lparam) });
+        },
         WM_PAINT => {
             userdata.window_state_lock().redraw_requested =
                 userdata.event_loop_runner.should_buffer();
