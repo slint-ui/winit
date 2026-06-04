@@ -4,6 +4,7 @@ use std::ffi::{OsString, c_void};
 use std::io;
 use std::ops::ControlFlow;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{self, AtomicI64, AtomicUsize, Ordering};
 
@@ -270,11 +271,11 @@ pub struct FileDropHandlerData {
     runner: Rc<EventLoopRunner>,
     send_event: Box<dyn Fn(WindowEvent)>,
     active_data_transfer_id: Option<DataTransferId>,
-    // Shell drop-target helper. Lazy-init on first DragEnter; null means "not yet created" or
+    // Shell drop-target helper. Lazy-init on first DragEnter; `None` means "not yet created" or
     // "creation failed and we're running without a drag image". Forwarding to this is what
     // makes the source's `IDragSourceHelper` bitmap actually render under the cursor over our
     // own window and any other helper-aware target.
-    drop_target_helper: *mut IDropTargetHelper,
+    drop_target_helper: Option<NonNull<IDropTargetHelper>>,
 }
 
 pub struct FileDropHandler {
@@ -295,19 +296,21 @@ impl FileDropHandler {
             runner,
             send_event,
             active_data_transfer_id: None,
-            drop_target_helper: std::ptr::null_mut(),
+            drop_target_helper: None,
         });
         FileDropHandler { data: Box::into_raw(data) }
     }
 
-    /// Lazy-create the shell drop-target helper. Returns null if creation failed; callers should
-    /// treat that as "no drag image" and continue silently - failure is purely cosmetic.
-    unsafe fn ensure_drop_target_helper(data: &mut FileDropHandlerData) -> *mut IDropTargetHelper {
+    /// Lazy-create the shell drop-target helper. Returns `None` if creation failed; callers
+    /// should treat that as "no drag image" and continue silently - failure is purely cosmetic.
+    unsafe fn ensure_drop_target_helper(
+        data: &mut FileDropHandlerData,
+    ) -> Option<NonNull<IDropTargetHelper>> {
         use windows_sys::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
         use windows_sys::Win32::UI::Shell::CLSID_DragDropHelper;
 
-        if !data.drop_target_helper.is_null() {
-            return data.drop_target_helper;
+        if let Some(helper) = data.drop_target_helper {
+            return Some(helper);
         }
         let mut helper: *mut IDropTargetHelper = std::ptr::null_mut();
         let hr = unsafe {
@@ -320,14 +323,15 @@ impl FileDropHandler {
             )
         };
         if hr < 0 {
-            return std::ptr::null_mut();
+            return None;
         }
-        data.drop_target_helper = helper;
-        helper
+        let helper = NonNull::new(helper)?;
+        data.drop_target_helper = Some(helper);
+        Some(helper)
     }
 
-    unsafe fn helper_vtbl(helper: *mut IDropTargetHelper) -> &'static IDropTargetHelperVtbl {
-        unsafe { &*(*(helper as *mut *const IDropTargetHelperVtbl)) }
+    unsafe fn helper_vtbl(helper: NonNull<IDropTargetHelper>) -> &'static IDropTargetHelperVtbl {
+        unsafe { &*(*(helper.as_ptr() as *mut *const IDropTargetHelperVtbl)) }
     }
 
     pub(crate) unsafe fn interface_unchecked_mut(&mut self) -> &mut IDropTarget {
@@ -366,10 +370,10 @@ impl FileDropHandler {
                 drop_handler.runner.remove_data_transfer(id);
             }
             // Release the shell drop-target helper if we created one.
-            if !drop_handler.drop_target_helper.is_null() {
-                let vtbl = unsafe { Self::helper_vtbl(drop_handler.drop_target_helper) };
+            if let Some(helper) = drop_handler.drop_target_helper {
+                let vtbl = unsafe { Self::helper_vtbl(helper) };
                 unsafe {
-                    (vtbl.parent.Release)(drop_handler.drop_target_helper as *mut IUnknown);
+                    (vtbl.parent.Release)(helper.as_ptr() as *mut IUnknown);
                 }
             }
             // Destroy the underlying data
@@ -415,12 +419,11 @@ impl FileDropHandler {
 
         // Forward to the shell drop-target helper so any drag image attached by the source's
         // IDragSourceHelper renders the bitmap under the cursor while it's over our window.
-        let helper = unsafe { Self::ensure_drop_target_helper(drop_handler) };
-        if !helper.is_null() {
+        if let Some(helper) = unsafe { Self::ensure_drop_target_helper(drop_handler) } {
             let vtbl = unsafe { Self::helper_vtbl(helper) };
             unsafe {
                 (vtbl.DragEnter)(
-                    helper,
+                    helper.as_ptr(),
                     drop_handler.window,
                     pDataObj as *mut IDataObject,
                     &pt_screen,
@@ -462,10 +465,9 @@ impl FileDropHandler {
             *pdwEffect = new_effect;
         }
 
-        let helper = drop_handler.drop_target_helper;
-        if !helper.is_null() {
+        if let Some(helper) = drop_handler.drop_target_helper {
             let vtbl = unsafe { Self::helper_vtbl(helper) };
-            unsafe { (vtbl.DragOver)(helper, &pt_screen, new_effect) };
+            unsafe { (vtbl.DragOver)(helper.as_ptr(), &pt_screen, new_effect) };
         }
 
         S_OK
@@ -480,10 +482,9 @@ impl FileDropHandler {
         (drop_handler.send_event)(WindowEvent::DragLeft { id: data_transfer_id });
         drop_handler.runner.remove_data_transfer(data_transfer_id);
 
-        let helper = drop_handler.drop_target_helper;
-        if !helper.is_null() {
+        if let Some(helper) = drop_handler.drop_target_helper {
             let vtbl = unsafe { Self::helper_vtbl(helper) };
-            unsafe { (vtbl.DragLeave)(helper) };
+            unsafe { (vtbl.DragLeave)(helper.as_ptr()) };
         }
 
         S_OK
@@ -533,11 +534,10 @@ impl FileDropHandler {
             *pdwEffect = effect;
         }
 
-        let helper = drop_handler.drop_target_helper;
-        if !helper.is_null() {
+        if let Some(helper) = drop_handler.drop_target_helper {
             let vtbl = unsafe { Self::helper_vtbl(helper) };
             unsafe {
-                (vtbl.Drop)(helper, pDataObj as *mut IDataObject, &pt_screen, effect);
+                (vtbl.Drop)(helper.as_ptr(), pDataObj as *mut IDataObject, &pt_screen, effect);
             }
         }
 
