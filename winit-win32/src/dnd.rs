@@ -14,7 +14,10 @@ use windows_sys::Win32::Foundation::{
     OLE_E_ADVISENOTSUPPORTED, POINT, POINTL, S_FALSE, S_OK,
 };
 use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
-use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL};
+use windows_sys::Win32::System::Com::{
+    DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_ENHMF, TYMED_FILE, TYMED_GDI, TYMED_HGLOBAL,
+    TYMED_MFPICT,
+};
 use windows_sys::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows_sys::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
@@ -680,16 +683,24 @@ fn cf_formats_for_hint(hint: TypeHint) -> Vec<(u16, TypeHint)> {
 unsafe fn duplicate_stgmedium(src: &STGMEDIUM, cf_format: u16) -> Option<STGMEDIUM> {
     use windows_sys::Win32::Foundation::HANDLE;
 
+    // Pull the handle out of the union by tymed. The shell drag helper only uses HGLOBAL today,
+    // but forwarding every handle-typed tymed `OleDuplicateData` understands is essentially
+    // free, so do it. Interface-based tymeds (IStream / IStorage) deliberately fall through -
+    // duplicating them properly requires AddRef, not OleDuplicateData.
+    let tymed = src.tymed as i32;
     let handle: HANDLE = unsafe {
-        match src.tymed {
-            t if t == TYMED_HGLOBAL as u32 => src.u.hGlobal as HANDLE,
-            // Other handle-typed tymeds; the shell drag helper doesn't currently use these but
-            // OleDuplicateData supports them so we'd rather forward than refuse.
-            1 /* TYMED_FILE */ => src.u.lpszFileName as HANDLE,
-            32 /* TYMED_GDI / HBITMAP */ => src.u.hBitmap as HANDLE,
-            64 /* TYMED_MFPICT */ => src.u.hMetaFilePict as HANDLE,
-            128 /* TYMED_ENHMF */ => src.u.hEnhMetaFile as HANDLE,
-            _ => return None,
+        if tymed == TYMED_HGLOBAL {
+            src.u.hGlobal as HANDLE
+        } else if tymed == TYMED_FILE {
+            src.u.lpszFileName as HANDLE
+        } else if tymed == TYMED_GDI {
+            src.u.hBitmap as HANDLE
+        } else if tymed == TYMED_MFPICT {
+            src.u.hMetaFilePict as HANDLE
+        } else if tymed == TYMED_ENHMF {
+            src.u.hEnhMetaFile as HANDLE
+        } else {
+            return None;
         }
     };
     let dup = unsafe { OleDuplicateData(handle, cf_format, 0) };
@@ -698,13 +709,18 @@ unsafe fn duplicate_stgmedium(src: &STGMEDIUM, cf_format: u16) -> Option<STGMEDI
     }
     let mut out: STGMEDIUM = unsafe { std::mem::zeroed() };
     out.tymed = src.tymed;
-    match src.tymed {
-        t if t == TYMED_HGLOBAL as u32 => out.u.hGlobal = dup as _,
-        1 => out.u.lpszFileName = dup as _,
-        32 => out.u.hBitmap = dup as _,
-        64 => out.u.hMetaFilePict = dup as _,
-        128 => out.u.hEnhMetaFile = dup as _,
-        _ => unreachable!(),
+    if tymed == TYMED_HGLOBAL {
+        out.u.hGlobal = dup as _;
+    } else if tymed == TYMED_FILE {
+        out.u.lpszFileName = dup as _;
+    } else if tymed == TYMED_GDI {
+        out.u.hBitmap = dup as _;
+    } else if tymed == TYMED_MFPICT {
+        out.u.hMetaFilePict = dup as _;
+    } else if tymed == TYMED_ENHMF {
+        out.u.hEnhMetaFile = dup as _;
+    } else {
+        unreachable!();
     }
     Some(out)
 }
