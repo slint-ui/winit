@@ -810,9 +810,8 @@ unsafe fn send_data_to_stgmedium(data: SendData, hint: TypeHint) -> Option<STGME
         SendData::String(s) => {
             // UTF-16 + NUL - used for `CF_UNICODETEXT` and other text-ish registered formats.
             let utf16 = util::encode_wide(&s);
-            let utf16_bytes = unsafe {
-                std::slice::from_raw_parts(utf16.as_ptr() as *const u8, utf16.len() * 2)
-            };
+            let utf16_bytes =
+                unsafe { std::slice::from_raw_parts(utf16.as_ptr() as *const u8, utf16.len() * 2) };
             alloc_hglobal_from(utf16_bytes)?
         },
         SendData::Uris(paths) => {
