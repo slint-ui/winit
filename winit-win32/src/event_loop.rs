@@ -534,10 +534,9 @@ impl RootActiveEventLoop for ActiveEventLoop {
         // after burning a full modal pump. Fail fast instead - the caller asked for a drag
         // they explicitly refuse to allow.
         if allowed_effects == 0 {
-            return Err(NotSupportedError::new(
-                "start_drag called with an empty action mask (DndActions::none())",
-            )
-            .into());
+            return Err(
+                NotSupportedError::new("start_drag called with an empty action mask").into()
+            );
         }
 
         let id = crate::dnd::next_data_transfer_id();
