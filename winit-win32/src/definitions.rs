@@ -215,21 +215,11 @@ pub const IID_IDropSource: GUID = GUID::from_u128(0x00000121_0000_0000_c000_0000
 /// Defined in `objidl.h`.
 pub const IID_IEnumFORMATETC: GUID = GUID::from_u128(0x00000103_0000_0000_c000_000000000046);
 
-/// Defined in `shobjidl_core.h`. `{DE5BF786-477A-11D2-839D-00C04FD918D0}`.
-pub const IID_IDragSourceHelper: GUID = GUID {
-    data1: 0xde5bf786,
-    data2: 0x477a,
-    data3: 0x11d2,
-    data4: [0x83, 0x9d, 0x00, 0xc0, 0x4f, 0xd9, 0x18, 0xd0],
-};
+/// Defined in `shobjidl_core.h`.
+pub const IID_IDragSourceHelper: GUID = GUID::from_u128(0xde5bf786_477a_11d2_839d_00c04fd918d0);
 
-/// Defined in `shobjidl_core.h`. `{4657278B-411B-11D2-839A-00C04FD918D0}`.
-pub const IID_IDropTargetHelper: GUID = GUID {
-    data1: 0x4657278b,
-    data2: 0x411b,
-    data3: 0x11d2,
-    data4: [0x83, 0x9a, 0x00, 0xc0, 0x4f, 0xd9, 0x18, 0xd0],
-};
+/// Defined in `shobjidl_core.h`.
+pub const IID_IDropTargetHelper: GUID = GUID::from_u128(0x4657278b_411b_11d2_839a_00c04fd918d0);
 
 /// Defined in `shobjidl_core.h`.
 pub const CLSID_TaskbarList: GUID = GUID {
