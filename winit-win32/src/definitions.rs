@@ -207,28 +207,13 @@ pub struct ITaskbarList2 {
 }
 
 /// Defined in `objidl.h`.
-pub const IID_IDataObject: GUID = GUID {
-    data1: 0x0000010e,
-    data2: 0x0000,
-    data3: 0x0000,
-    data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
-};
+pub const IID_IDataObject: GUID = GUID::from_u128(0x0000010e_0000_0000_c000_000000000046);
 
 /// Defined in `oleidl.h`.
-pub const IID_IDropSource: GUID = GUID {
-    data1: 0x00000121,
-    data2: 0x0000,
-    data3: 0x0000,
-    data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
-};
+pub const IID_IDropSource: GUID = GUID::from_u128(0x00000121_0000_0000_c000_000000000046);
 
 /// Defined in `objidl.h`.
-pub const IID_IEnumFORMATETC: GUID = GUID {
-    data1: 0x00000103,
-    data2: 0x0000,
-    data3: 0x0000,
-    data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
-};
+pub const IID_IEnumFORMATETC: GUID = GUID::from_u128(0x00000103_0000_0000_c000_000000000046);
 
 /// Defined in `shobjidl_core.h`. `{DE5BF786-477A-11D2-839D-00C04FD918D0}`.
 pub const IID_IDragSourceHelper: GUID = GUID {
