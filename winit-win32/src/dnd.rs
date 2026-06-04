@@ -727,8 +727,8 @@ unsafe fn duplicate_stgmedium(src: &STGMEDIUM, cf_format: u16) -> Option<STGMEDI
     Some(out)
 }
 
-unsafe fn alloc_hglobal_from(src: *const u8, len: usize) -> Option<HGLOBAL> {
-    let hglobal = unsafe { GlobalAlloc(GMEM_MOVEABLE, len) };
+fn alloc_hglobal_from(src: &[u8]) -> Option<HGLOBAL> {
+    let hglobal = unsafe { GlobalAlloc(GMEM_MOVEABLE, src.len()) };
     if hglobal.is_null() {
         return None;
     }
@@ -739,7 +739,7 @@ unsafe fn alloc_hglobal_from(src: *const u8, len: usize) -> Option<HGLOBAL> {
         unsafe { GlobalFree(hglobal) };
         return None;
     }
-    unsafe { std::ptr::copy_nonoverlapping(src, dst as *mut u8, len) };
+    unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), dst as *mut u8, src.len()) };
     unsafe { GlobalUnlock(hglobal) };
     Some(hglobal)
 }
@@ -802,12 +802,15 @@ unsafe fn send_data_to_stgmedium(data: SendData, hint: TypeHint) -> Option<STGME
             // HTML Clipboard Format: UTF-8 with a Version/StartHTML/EndHTML/StartFragment/
             // EndFragment header. Targets parse the header before reading the wrapped HTML.
             let bytes = build_html_clipboard_format(&s);
-            unsafe { alloc_hglobal_from(bytes.as_ptr(), bytes.len()) }?
+            alloc_hglobal_from(&bytes)?
         },
         SendData::String(s) => {
             // UTF-16 + NUL - used for `CF_UNICODETEXT` and other text-ish registered formats.
             let utf16 = util::encode_wide(&s);
-            unsafe { alloc_hglobal_from(utf16.as_ptr() as *const u8, utf16.len() * 2) }?
+            let utf16_bytes = unsafe {
+                std::slice::from_raw_parts(utf16.as_ptr() as *const u8, utf16.len() * 2)
+            };
+            alloc_hglobal_from(utf16_bytes)?
         },
         SendData::Uris(paths) => {
             // CF_HDROP: `DROPFILES` header + double-NUL-terminated UTF-16 path list.
@@ -845,7 +848,7 @@ unsafe fn send_data_to_stgmedium(data: SendData, hint: TypeHint) -> Option<STGME
             }
             hglobal
         },
-        SendData::Bytes(b) => unsafe { alloc_hglobal_from(b.as_ptr(), b.len()) }?,
+        SendData::Bytes(b) => alloc_hglobal_from(&b)?,
     };
 
     let mut medium = unsafe { std::mem::zeroed::<STGMEDIUM>() };
