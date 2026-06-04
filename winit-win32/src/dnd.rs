@@ -818,7 +818,23 @@ unsafe fn send_data_to_stgmedium(data: SendData, hint: TypeHint) -> Option<STGME
         SendData::Uris(paths) => {
             // CF_HDROP: `DROPFILES` header + double-NUL-terminated UTF-16 path list.
             let mut wide: Vec<u16> = Vec::new();
-            for path in &paths {
+            for path in paths {
+                let path = 'uri_to_path: {
+                    if let Some(path_str) = path.to_str() {
+                        // There's no `strip_prefix` etc on `OsStr` so we need to go via `str`
+                        // Windows is the only platform that sends raw file paths instead of URIs
+                        let Some(path_str) = path_str.strip_prefix("file://") else {
+                            break 'uri_to_path path;
+                        };
+
+                        // Even though "/" is theoretically a valid path separator on Windows, it
+                        // doesn't seem to work for drag-and-drop specifically.
+                        OsString::from(path_str.replace("/", "\\"))
+                    } else {
+                        path
+                    }
+                };
+
                 wide.extend(path.encode_wide());
                 wide.push(0);
             }
