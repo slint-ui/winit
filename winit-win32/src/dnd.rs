@@ -359,8 +359,11 @@ impl FileDropHandler {
 
     unsafe extern "system" fn Release(this: *mut IUnknown) -> u32 {
         let drop_handler = unsafe { Self::from_interface(this) };
-        // See the SourceDataObject Release for why we use Release on decrement and an
-        // Acquire fence on the zero-transition (standard Arc pattern).
+        // Release on decrement publishes any writes made through this reference before the
+        // count is observed by other threads. When we hit zero, fence with Acquire so the
+        // destructor sees all writes from prior Releases on other threads - the standard
+        // Arc pattern. Without the fence, dropping the box could race with reads done by
+        // the last releasing thread on another core.
         let count = drop_handler.refcount.fetch_sub(1, Ordering::Release) - 1;
         if count == 0 {
             atomic::fence(Ordering::Acquire);
