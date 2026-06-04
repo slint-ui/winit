@@ -206,14 +206,6 @@ pub struct ITaskbarList2 {
     pub lpVtbl: *const ITaskbarList2Vtbl,
 }
 
-/// Defined in `unknwn.h`.
-pub const IID_IUnknown: GUID = GUID {
-    data1: 0x00000000,
-    data2: 0x0000,
-    data3: 0x0000,
-    data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
-};
-
 /// Defined in `objidl.h`.
 pub const IID_IDataObject: GUID = GUID {
     data1: 0x0000010e,

@@ -31,7 +31,7 @@ use windows_sys::Win32::System::SystemServices::{
     MK_LBUTTON, MK_MBUTTON, MK_RBUTTON, MK_XBUTTON1, MK_XBUTTON2,
 };
 use windows_sys::Win32::UI::Shell::{DROPFILES, DragQueryFileW, HDROP};
-use windows_sys::core::{BOOL, GUID, HRESULT};
+use windows_sys::core::{BOOL, GUID, HRESULT, IID_IUnknown};
 use winit_core::data_transfer::{
     DataTransfer, DataTransferId, DataTransferSend, SendData, TransferType, TypeHint, TypedData,
 };
@@ -41,8 +41,7 @@ use winit_core::event_loop::DndActions;
 use crate::definitions::{
     IDataObject, IDataObjectVtbl, IDropSource, IDropSourceVtbl, IDropTarget, IDropTargetHelper,
     IDropTargetHelperVtbl, IDropTargetVtbl, IEnumFORMATETC, IEnumFORMATETCVtbl, IID_IDataObject,
-    IID_IDropSource, IID_IDropTargetHelper, IID_IEnumFORMATETC, IID_IUnknown, IUnknown,
-    IUnknownVtbl,
+    IID_IDropSource, IID_IDropTargetHelper, IID_IEnumFORMATETC, IUnknown, IUnknownVtbl,
 };
 use crate::event_loop::EventLoopRunner;
 use crate::util;
