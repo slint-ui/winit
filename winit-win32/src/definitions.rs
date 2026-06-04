@@ -206,7 +206,7 @@ pub struct ITaskbarList2 {
     pub lpVtbl: *const ITaskbarList2Vtbl,
 }
 
-// Well-known COM IIDs. Values from `unknwn.h`, `objidl.h`, `oleidl.h`.
+/// Defined in `unknwn.h`.
 pub const IID_IUnknown: GUID = GUID {
     data1: 0x00000000,
     data2: 0x0000,
@@ -214,6 +214,7 @@ pub const IID_IUnknown: GUID = GUID {
     data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
 };
 
+/// Defined in `objidl.h`.
 pub const IID_IDataObject: GUID = GUID {
     data1: 0x0000010e,
     data2: 0x0000,
@@ -221,6 +222,7 @@ pub const IID_IDataObject: GUID = GUID {
     data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
 };
 
+/// Defined in `oleidl.h`.
 pub const IID_IDropSource: GUID = GUID {
     data1: 0x00000121,
     data2: 0x0000,
@@ -228,6 +230,7 @@ pub const IID_IDropSource: GUID = GUID {
     data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
 };
 
+/// Defined in `objidl.h`.
 pub const IID_IEnumFORMATETC: GUID = GUID {
     data1: 0x00000103,
     data2: 0x0000,
@@ -235,7 +238,7 @@ pub const IID_IEnumFORMATETC: GUID = GUID {
     data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
 };
 
-// {DE5BF786-477A-11D2-839D-00C04FD918D0}
+/// Defined in `shobjidl_core.h`. `{DE5BF786-477A-11D2-839D-00C04FD918D0}`.
 pub const IID_IDragSourceHelper: GUID = GUID {
     data1: 0xde5bf786,
     data2: 0x477a,
@@ -243,7 +246,7 @@ pub const IID_IDragSourceHelper: GUID = GUID {
     data4: [0x83, 0x9d, 0x00, 0xc0, 0x4f, 0xd9, 0x18, 0xd0],
 };
 
-// {4657278B-411B-11D2-839A-00C04FD918D0}
+/// Defined in `shobjidl_core.h`. `{4657278B-411B-11D2-839A-00C04FD918D0}`.
 pub const IID_IDropTargetHelper: GUID = GUID {
     data1: 0x4657278b,
     data2: 0x411b,
@@ -251,6 +254,7 @@ pub const IID_IDropTargetHelper: GUID = GUID {
     data4: [0x83, 0x9a, 0x00, 0xc0, 0x4f, 0xd9, 0x18, 0xd0],
 };
 
+/// Defined in `shobjidl_core.h`.
 pub const CLSID_TaskbarList: GUID = GUID {
     data1: 0x56fdf344,
     data2: 0xfd6d,
@@ -258,6 +262,7 @@ pub const CLSID_TaskbarList: GUID = GUID {
     data4: [0x95, 0x8a, 0x00, 0x60, 0x97, 0xc9, 0xa0, 0x90],
 };
 
+/// Defined in `shobjidl_core.h`.
 pub const IID_ITaskbarList: GUID = GUID {
     data1: 0x56fdf342,
     data2: 0xfd6d,
@@ -265,6 +270,7 @@ pub const IID_ITaskbarList: GUID = GUID {
     data4: [0x95, 0x8a, 0x00, 0x60, 0x97, 0xc9, 0xa0, 0x90],
 };
 
+/// Defined in `shobjidl_core.h`.
 pub const IID_ITaskbarList2: GUID = GUID {
     data1: 0x602d4995,
     data2: 0xb13a,
