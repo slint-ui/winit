@@ -89,19 +89,17 @@ impl DataSourceHandler for WinitState {
                     }
                 }
             },
-            SendData::String(str) => {
-                match mime.parse_charset().or(mime.default_charset()).unwrap_or_default() {
-                    Charset::Utf8 => {
-                        let _ = fd.write_all(str.as_bytes());
-                    },
-                    Charset::Utf16 => {
-                        let utf16_binary = str
-                            .encode_utf16()
-                            .flat_map(|uint16| uint16.to_ne_bytes())
-                            .collect::<Vec<_>>();
-                        let _ = fd.write_all(&utf16_binary);
-                    },
-                }
+            SendData::String(str) => match mime.parse_charset().unwrap_or(mime.default_charset()) {
+                Charset::Utf8 => {
+                    let _ = fd.write_all(str.as_bytes());
+                },
+                Charset::Utf16 => {
+                    let utf16_binary = str
+                        .encode_utf16()
+                        .flat_map(|uint16| uint16.to_ne_bytes())
+                        .collect::<Vec<_>>();
+                    let _ = fd.write_all(&utf16_binary);
+                },
             },
             SendData::Bytes(binary) => {
                 let _ = fd.write_all(&binary);
@@ -270,11 +268,10 @@ impl MimeType {
         }
     }
 
-    fn default_charset(&self) -> Option<Charset> {
-        match self.hint? {
-            TypeHint::Plaintext => Some(Charset::Utf8),
-            TypeHint::Html => Some(Charset::Utf16),
-            _ => None,
+    fn default_charset(&self) -> Charset {
+        match self.hint {
+            Some(TypeHint::Html) => Charset::Utf16,
+            _ => Charset::Utf8,
         }
     }
 
@@ -389,8 +386,7 @@ impl TypedData for MimeData {
             ));
         };
 
-        // Default charset is UTF-16 for some reason
-        let charset = self.mime_type.parse_charset().unwrap_or(Charset::Utf16);
+        let charset = self.mime_type.parse_charset().unwrap_or(self.mime_type.default_charset());
 
         match charset {
             Charset::Utf8 => {
