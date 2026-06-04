@@ -722,7 +722,10 @@ unsafe fn duplicate_stgmedium(src: &STGMEDIUM, cf_format: u16) -> Option<STGMEDI
     } else if tymed == TYMED_ENHMF {
         out.u.hEnhMetaFile = dup as _;
     } else {
-        unreachable!();
+        // Should be unreachable - the same `tymed` matched the first chain above. Return
+        // `None` rather than panic: this runs across the COM/FFI boundary, where unwinding
+        // would be UB.
+        return None;
     }
     Some(out)
 }
