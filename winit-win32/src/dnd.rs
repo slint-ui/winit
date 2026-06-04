@@ -1379,8 +1379,10 @@ impl Drop for DropSource {
 /// during the drag instead of the default no-image cursor.
 ///
 /// `rgba` is the icon's pixel buffer in straight RGBA8 with `width * height * 4` bytes;
-/// `hot_offset` is the icon-relative offset of the cursor hot spot (cross-platform sign:
-/// `(-w/2, -h/2)` centres the icon on the cursor).
+/// `offset` matches `DragIcon::offset` - `(0, 0)` sits the cursor at the icon's top-left,
+/// `(-w/2, -h/2)` centres the icon on the cursor. Windows expresses this as the offset from
+/// the icon's upper-left to the cursor hot spot (sign inverted), so we negate when filling
+/// in `SHDRAGIMAGE::ptOffset`.
 ///
 /// Returns `Ok(())` on success. On failure the caller's data object is left untouched and the
 /// drag still runs - just without a custom image. We never propagate the error: a missing drag
@@ -1390,7 +1392,7 @@ pub(crate) unsafe fn apply_drag_image(
     width: u32,
     height: u32,
     rgba: &[u8],
-    hot_offset: dpi::PhysicalPosition<i32>,
+    offset: dpi::PhysicalPosition<i32>,
 ) -> Result<(), HRESULT> {
     use windows_sys::Win32::Graphics::Gdi::{
         BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject, HDC,
@@ -1469,7 +1471,7 @@ pub(crate) unsafe fn apply_drag_image(
     // cursor). Negate to translate between the two conventions.
     let sdi = SHDRAGIMAGE {
         sizeDragImage: windows_sys::Win32::Foundation::SIZE { cx: width as i32, cy: height as i32 },
-        ptOffset: POINT { x: -hot_offset.x, y: -hot_offset.y },
+        ptOffset: POINT { x: -offset.x, y: -offset.y },
         hbmpDragImage: hbitmap,
         crColorKey: 0xffff_ffff, // CLR_NONE - use the alpha channel
     };
