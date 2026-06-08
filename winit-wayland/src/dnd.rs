@@ -430,6 +430,10 @@ impl DataOffer {
         self.transfer_id
     }
 
+    pub(crate) fn first_mime_type(&self) -> Option<&MimeType> {
+        self.mime_types.first()
+    }
+
     pub(crate) fn window_id(&self) -> WindowId {
         self.window_id
     }

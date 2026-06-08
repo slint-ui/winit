@@ -749,7 +749,19 @@ impl RootActiveEventLoop for ActiveEventLoop {
             return Err(os_error!(UnknownDataTransfer(id)).into());
         }
 
-        state.set_actions(&DndActionSet::from_dyn(mask));
+        let actions = DndActionSet::from_dyn(mask);
+        state.set_actions(&actions);
+        let accepted_type = if actions.dnd_actions.is_empty() {
+            None
+        } else {
+            state.first_mime_type().map(|mime| mime.to_string())
+        };
+        // Some compositors won't even send the "dropped" event if no type
+        // has been accepted, so we need to accept _something_ here. The
+        // application can accept further types by fetching the data, but
+        // this will at least mean that waiting until the drop to start
+        // fetching data won't prevent the drop from working at all.
+        state.accept(state.transfer_id().into_raw() as _, accepted_type);
 
         Ok(())
     }
