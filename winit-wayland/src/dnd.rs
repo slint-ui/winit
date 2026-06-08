@@ -15,6 +15,7 @@ use sctk::data_device_manager::WritePipe;
 use sctk::data_device_manager::data_device::{DataDeviceData, DataDeviceHandler};
 use sctk::data_device_manager::data_offer::{DataOfferHandler, DragOffer};
 use sctk::data_device_manager::data_source::{DataSourceHandler, DragSource as SctkDragSource};
+use sctk::reexports::client::backend::ObjectId;
 use wayland_client::protocol::wl_data_device::WlDataDevice;
 use wayland_client::protocol::wl_data_device_manager::DndAction;
 use wayland_client::protocol::wl_data_offer::WlDataOffer;
@@ -432,14 +433,14 @@ pub struct DataOffer {
     mime_types: Arc<[MimeType]>,
     // TODO: Internal drag-and-drop.
     data: WlDataOffer,
+    data_device_id: ObjectId,
     serial: u32,
-    transfer_id: DataTransferId,
     window_id: WindowId,
 }
 
 impl DataOffer {
     pub(crate) fn transfer_id(&self) -> DataTransferId {
-        self.transfer_id
+        make_data_transfer_id(self.data_device_id, self.serial)
     }
 
     pub(crate) fn first_mime_type(&self) -> Option<&MimeType> {
@@ -704,7 +705,7 @@ impl DataDeviceHandler for WinitState {
                 .collect::<Vec<_>>()
                 .into(),
             serial: drag.serial,
-            transfer_id: make_data_transfer_id(data_device, drag.serial),
+            data_device_id: data_device.id(),
             data: drag.inner().clone(),
             window_id,
         });
@@ -722,10 +723,7 @@ impl DataDeviceHandler for WinitState {
         let position: PhysicalPosition<f64> = LogicalPosition::new(x, y).to_physical(scale_factor);
 
         self.events_sink.push_window_event(
-            WindowEvent::DragEntered {
-                id: make_data_transfer_id(data_device, drag.serial),
-                position: Some(position),
-            },
+            WindowEvent::DragEntered { id: current_drag.transfer_id(), position: Some(position) },
             window_id,
         );
     }
@@ -768,6 +766,10 @@ impl DataDeviceHandler for WinitState {
             return;
         };
 
+        let Some(current_drag) = self.dnd_state.receive_drag() else {
+            return;
+        };
+
         let window_id = crate::make_wid(&drag.surface);
 
         let scale_factor = self
@@ -779,10 +781,7 @@ impl DataDeviceHandler for WinitState {
         let position: PhysicalPosition<f64> = LogicalPosition::new(x, y).to_physical(scale_factor);
 
         self.events_sink.push_window_event(
-            WindowEvent::DragPosition {
-                id: make_data_transfer_id(data_device, drag.serial),
-                position,
-            },
+            WindowEvent::DragPosition { id: current_drag.transfer_id(), position },
             window_id,
         );
     }
@@ -805,10 +804,14 @@ impl DataDeviceHandler for WinitState {
             return;
         };
 
+        let Some(current_drag) = self.dnd_state.receive_drag() else {
+            return;
+        };
+
         let window_id = crate::make_wid(&drag.surface);
 
         self.events_sink.push_window_event(
-            WindowEvent::DragDropped { id: make_data_transfer_id(data_device, drag.serial) },
+            WindowEvent::DragDropped { id: current_drag.transfer_id() },
             window_id,
         );
 

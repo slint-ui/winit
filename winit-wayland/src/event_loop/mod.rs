@@ -20,6 +20,7 @@ use sctk::reexports::calloop_wayland_source::WaylandSource;
 use sctk::reexports::client::{Connection, QueueHandle, globals};
 use sctk::shell::WaylandSurface;
 use tracing::warn;
+use wayland_client::Proxy;
 use wayland_client::protocol::wl_shm::Format;
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{CustomCursor as CoreCustomCursor, CustomCursorSource};
@@ -858,7 +859,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
             ),
         }
 
-        let transfer_id = make_data_transfer_id(data_device.inner(), serial);
+        let transfer_id = make_data_transfer_id(data_device.inner().id(), serial);
 
         std::mem::drop(pool);
         std::mem::drop(source_window_state);
