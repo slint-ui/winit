@@ -146,11 +146,23 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
         )))
     }
 
+    /// Get the set of valid actions for the specified data transfer.
+    ///
+    /// If the data transfer does not exist or is not from a drag-and-drop operation, will return an
+    /// error.
+    fn valid_actions(&self, id: DataTransferId) -> Result<Box<dyn DndActionMask>, RequestError> {
+        let _ = id;
+        Err(RequestError::NotSupported(NotSupportedError::new(
+            DATA_TRANSFER_UNSUPPORTED_ERROR_MESSAGE,
+        )))
+    }
+
     /// Set a given `DndActionMask` as the valid actions for the given [`DataTransferId`],
-    /// presuming that the transfer ID is from a drag-and-drop operation.
+    /// if the transfer ID is from a drag-and-drop operation.
     ///
     /// This allows the OS/compositor to display the correct UI, indicating that the dragged data
-    /// can be dropped.
+    /// can be dropped. If the data transfer does not exist or is not from a drag-and-drop
+    /// operation, will return an error.
     fn set_valid_actions(
         &self,
         id: DataTransferId,

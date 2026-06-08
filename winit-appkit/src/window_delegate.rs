@@ -398,6 +398,10 @@ define_class!(
 
             let transfer_id = DataTransferId::from_raw(sender.draggingSequenceNumber() as i64);
             vars.app_state.pasteboards().insert(transfer_id, &pb);
+            vars.app_state
+                .pasteboards()
+                .set_source_operation_mask(transfer_id, sender.draggingSourceOperationMask());
+
             let valid_operations = NSDragOperation::empty();
             vars.app_state.drag_state().set(Some(DragState {
                 id: transfer_id,
@@ -436,6 +440,9 @@ define_class!(
             let pb = sender.draggingPasteboard();
 
             vars.app_state.pasteboards().set_pasteboard(transfer_id, &pb);
+            vars.app_state
+                .pasteboards()
+                .set_source_operation_mask(transfer_id, sender.draggingSourceOperationMask());
 
             let dl = sender.draggingLocation();
             let dl = self.view().convertPoint_fromView(dl, None);
@@ -471,6 +478,9 @@ define_class!(
             let pb = sender.draggingPasteboard();
 
             vars.app_state.pasteboards().set_pasteboard(transfer_id, &pb);
+            vars.app_state
+                .pasteboards()
+                .set_source_operation_mask(transfer_id, sender.draggingSourceOperationMask());
 
             let dl = sender.draggingLocation();
             let dl = self.view().convertPoint_fromView(dl, None);

@@ -713,8 +713,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
         let (readfd, writefd) =
             pipe::pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK).map_err(|e| os_error!(e))?;
 
-        current_drag
-            .accept(current_drag.transfer_id().into_raw() as _, Some(mime_type_str.clone()));
+        current_drag.accept(current_drag.serial(), Some(mime_type_str.clone()));
         data_offer::receive_to_fd(current_drag, mime_type_str, writefd);
 
         let mime_type = mime_type.clone();

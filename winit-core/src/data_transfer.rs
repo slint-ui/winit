@@ -101,7 +101,7 @@ pub enum TypeHint {
     /// Image data
     Image {
         /// An optional hint for the encoding of the supplied bytes, specified using the standard
-        /// file extension for that audio format, lowercase and without the leading `.`.
+        /// file extension for that image format, lowercase and without the leading `.`.
         extension_hint: Option<&'static str>,
     },
 }

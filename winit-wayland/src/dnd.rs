@@ -81,7 +81,7 @@ impl DataSourceHandler for WinitState {
                 for os_str in iter {
                     // TODO: Is `as_encoded_bytes` correct here?
                     if fd
-                        .write_all(b"\n")
+                        .write_all(b"\r\n")
                         .and_then(|()| fd.write_all(os_str.as_encoded_bytes()))
                         .is_err()
                     {
@@ -96,7 +96,10 @@ impl DataSourceHandler for WinitState {
                 Charset::Utf16 => {
                     let utf16_binary = str
                         .encode_utf16()
-                        .flat_map(|uint16| uint16.to_ne_bytes())
+                        // I can't find any documentation on whether Wayland UTF-16 is required to
+                        // be little-, big-, or native-endian, but little-endian seems to work so
+                        // we'll make the assumption that it's consistent cross-platform for now.
+                        .flat_map(|uint16| uint16.to_le_bytes())
                         .collect::<Vec<_>>();
                     let _ = fd.write_all(&utf16_binary);
                 },
@@ -374,7 +377,15 @@ impl TypedData for MimeData {
             ));
         };
 
-        BufReader::new(file).lines().map(|res| res.map(OsString::from)).collect()
+        BufReader::new(file)
+            .lines()
+            .filter(|result| match result {
+                Ok(s) => !s.starts_with('#'),
+                // We want to maintain errors, so the final `collect` returns an error too
+                Err(_) => true,
+            })
+            .map(|res| res.map(OsString::from))
+            .collect()
     }
 
     fn try_as_string(&mut self) -> io::Result<String> {
@@ -415,12 +426,13 @@ impl TypedData for MimeData {
     }
 }
 
-/// A
+/// A wrapper around `WlDataOffer`, implementing `DataTransfer`.
 #[derive(Debug, Clone)]
 pub struct DataOffer {
     mime_types: Arc<[MimeType]>,
     // TODO: Internal drag-and-drop.
     data: WlDataOffer,
+    serial: u32,
     transfer_id: DataTransferId,
     window_id: WindowId,
 }
@@ -432,6 +444,10 @@ impl DataOffer {
 
     pub(crate) fn first_mime_type(&self) -> Option<&MimeType> {
         self.mime_types.first()
+    }
+
+    pub(crate) fn serial(&self) -> u32 {
+        self.serial
     }
 
     pub(crate) fn window_id(&self) -> WindowId {
@@ -687,6 +703,7 @@ impl DataDeviceHandler for WinitState {
                 .map(|str| MimeType::parse(str.clone()))
                 .collect::<Vec<_>>()
                 .into(),
+            serial: drag.serial,
             transfer_id: make_data_transfer_id(data_device, drag.serial),
             data: drag.inner().clone(),
             window_id,

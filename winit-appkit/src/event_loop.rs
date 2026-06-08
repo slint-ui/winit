@@ -176,6 +176,14 @@ impl RootActiveEventLoop for ActiveEventLoop {
         Ok(())
     }
 
+    fn valid_actions(&self, id: DataTransferId) -> Result<Box<dyn DndActionMask>, RequestError> {
+        self.app_state
+            .pasteboards()
+            .source_operation_mask(id)
+            .map(|ops| Box::new(ops) as _)
+            .ok_or_else(|| os_error!(UnknownDataTransfer(id)).into())
+    }
+
     fn start_drag(
         &self,
         source: WindowId,

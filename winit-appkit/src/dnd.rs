@@ -375,30 +375,54 @@ impl TypedData for PasteboardValue {
     }
 }
 
+#[derive(Debug)]
+struct StoredPasteboard {
+    pasteboard: Weak<NSPasteboard>,
+    operation_mask: Option<DragOperation>,
+}
+
 #[derive(Debug, Default)]
 pub struct Pasteboards {
-    inner: RefCell<HashMap<DataTransferId, Weak<NSPasteboard>>>,
+    inner: RefCell<HashMap<DataTransferId, StoredPasteboard>>,
 }
 
 impl Pasteboards {
     pub fn remove_deloaded_pasteboards(&self) {
-        self.inner.borrow_mut().retain(|_, v| v.load().is_some());
+        self.inner.borrow_mut().retain(|_, state| state.pasteboard.load().is_some());
     }
 
     /// If the data transfer exists, update the pasteboard it points to.
     pub fn set_pasteboard(&self, id: DataTransferId, pb: &Retained<NSPasteboard>) {
         let mut inner = self.inner.borrow_mut();
         if let Some(state) = inner.get_mut(&id) {
-            *state = Weak::from_retained(pb);
+            state.pasteboard = Weak::from_retained(pb);
+        }
+    }
+
+    pub fn set_source_operation_mask(&self, id: DataTransferId, operations: NSDragOperation) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(state) = inner.get_mut(&id) {
+            state.operation_mask = Some(DragOperation(operations));
         }
     }
 
     pub fn insert(&self, transfer_id: DataTransferId, pb: &Retained<NSPasteboard>) {
-        self.inner.borrow_mut().insert(transfer_id, Weak::from_retained(pb));
+        self.inner.borrow_mut().insert(transfer_id, StoredPasteboard {
+            pasteboard: Weak::from_retained(pb),
+            operation_mask: None,
+        });
     }
 
     pub fn get(&self, id: DataTransferId) -> Option<Pasteboard> {
-        self.inner.borrow().get(&id).and_then(|weak| weak.load()).map(|pb| Pasteboard::new(id, pb))
+        self.inner
+            .borrow()
+            .get(&id)
+            .and_then(|state| state.pasteboard.load())
+            .map(|pb| Pasteboard::new(id, pb))
+    }
+
+    pub fn source_operation_mask(&self, id: DataTransferId) -> Option<DragOperation> {
+        self.inner.borrow().get(&id).and_then(|state| state.operation_mask)
     }
 }
 
