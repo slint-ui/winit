@@ -22,10 +22,9 @@ use winit_core::cursor::{CustomCursor as CoreCustomCursor, CustomCursorSource};
 use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypedData};
 use winit_core::error::{EventLoopError, NotSupportedError, RequestError};
 use winit_core::event::{DeviceId, StartCause, WindowEvent};
-use winit_core::event_loop::DndAction;
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents,
+    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndAction,
     EventLoopProxy as CoreEventLoopProxy, EventLoopProxyProvider,
     OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
@@ -1141,18 +1140,15 @@ impl Device {
                 let ty = unsafe { (*class_ptr)._type };
                 if ty == ffi::XIScrollClass {
                     let info = unsafe { &*(class_ptr as *const ffi::XIScrollClassInfo) };
-                    scroll_axes.push((
-                        info.number,
-                        ScrollAxis {
-                            increment: info.increment,
-                            orientation: match info.scroll_type {
-                                ffi::XIScrollTypeHorizontal => ScrollOrientation::Horizontal,
-                                ffi::XIScrollTypeVertical => ScrollOrientation::Vertical,
-                                _ => unreachable!(),
-                            },
-                            position: 0.0,
+                    scroll_axes.push((info.number, ScrollAxis {
+                        increment: info.increment,
+                        orientation: match info.scroll_type {
+                            ffi::XIScrollTypeHorizontal => ScrollOrientation::Horizontal,
+                            ffi::XIScrollTypeVertical => ScrollOrientation::Vertical,
+                            _ => unreachable!(),
                         },
-                    ));
+                        position: 0.0,
+                    }));
                 } else if ty == ffi::XITouchClass {
                     r#type = Some(DeviceType::Touch);
                 } else if r#type.is_none() && ty == ffi::XIValuatorClass {
