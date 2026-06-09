@@ -26,7 +26,7 @@ use winit_core::data_transfer::{
     DataTransfer, DataTransferId, DataTransferSend, SendData, TransferType, TypeHint, TypedData,
 };
 use winit_core::event::WindowEvent;
-use winit_core::event_loop::{DndActionMask, DndActions};
+use winit_core::event_loop::{DndAction, DndActionMask};
 use winit_core::window::WindowId;
 
 use crate::make_data_transfer_id;
@@ -594,11 +594,11 @@ impl DndActionSet {
 }
 
 impl DndActionMask for DndActionSet {
-    fn hint(&self) -> DndActions {
+    fn hint(&self) -> DndAction {
         if self.dnd_actions.is_all() {
-            DndActions::All
+            DndAction::All
         } else {
-            DndActions::Flags {
+            DndAction::Flags {
                 move_: self.dnd_actions.contains(DndAction::Move),
                 copy: self.dnd_actions.contains(DndAction::Copy),
                 link: false,
@@ -619,8 +619,8 @@ impl DndActionMask for DndActionSet {
     }
 }
 
-impl From<DndActions> for DndActionSet {
-    fn from(value: DndActions) -> Self {
+impl From<DndAction> for DndActionSet {
+    fn from(value: DndAction) -> Self {
         let copy_flag = if value.copy() { DndAction::Copy } else { DndAction::empty() };
         let move_flag = if value.move_() { DndAction::Move } else { DndAction::empty() };
 

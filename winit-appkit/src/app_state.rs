@@ -15,19 +15,19 @@ use winit_common::event_handler::EventHandler;
 use winit_core::application::ApplicationHandler;
 use winit_core::data_transfer::DataTransferId;
 use winit_core::event::{StartCause, WindowEvent};
-use winit_core::event_loop::ControlFlow;
+use winit_core::event_loop::{ControlFlow, DndAction};
 use winit_core::window::WindowId;
 
 use super::event_loop::{ActiveEventLoop, notify_windows_of_exit, stop_app_immediately};
 use super::menu;
 use super::observer::EventLoopWaker;
-use crate::dnd::{DragOperation, Pasteboards};
+use crate::dnd::Pasteboards;
 use crate::window_delegate::WindowDelegate;
 
 #[derive(Debug)]
 pub(super) struct AppState {
     mtm: MainThreadMarker,
-    drag_state: Cell<Option<DragState>>,
+    drag_state: RefCell<Option<DragState>>,
     pasteboards: Pasteboards,
     activation_policy: Option<NSApplicationActivationPolicy>,
     default_menu: bool,
@@ -55,10 +55,10 @@ pub(super) struct AppState {
     // as such should be careful to not add fields that, in turn, strongly reference those.
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct DragState {
     pub id: DataTransferId,
-    pub valid_operations: DragOperation,
+    pub valid_actions: Vec<DndAction>,
 }
 
 // SAFETY: Creating `MainThreadBound` in a `const` context, where there is no concept of the
@@ -407,7 +407,7 @@ impl AppState {
         &self.pasteboards
     }
 
-    pub fn drag_state(&self) -> &Cell<Option<DragState>> {
+    pub fn drag_state(&self) -> &RefCell<Option<DragState>> {
         &self.drag_state
     }
 }

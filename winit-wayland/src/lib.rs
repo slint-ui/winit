@@ -22,10 +22,10 @@ use std::hash::BuildHasher;
 use std::ptr::NonNull;
 
 use dpi::{LogicalSize, PhysicalSize};
+use sctk::reexports::client::Proxy;
+use sctk::reexports::client::backend::ObjectId;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
-use sctk::reexports::client::{ObjectId, Proxy};
 use sctk::shm::slot::{Buffer, CreateBufferError, SlotPool};
-use wayland_client::protocol::wl_data_device::WlDataDevice;
 use wayland_client::protocol::wl_data_offer::WlDataOffer;
 use wayland_client::protocol::wl_shm::Format;
 use winit_core::data_transfer::DataTransferId;
@@ -163,7 +163,7 @@ fn make_wid(surface: &WlSurface) -> WindowId {
 fn make_data_transfer_id(data_device_id: ObjectId, serial: u32) -> DataTransferId {
     const BUILD_HASHER: foldhash::fast::FixedState = foldhash::fast::FixedState::with_seed(0);
 
-    DataTransferId::from_raw(BUILD_HASHER.hash_one((data_device.id(), serial)) as i64)
+    DataTransferId::from_raw(BUILD_HASHER.hash_one((data_device_id, serial)) as i64)
 }
 
 /// The default routine does floor, but we need round on Wayland.

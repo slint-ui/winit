@@ -24,7 +24,7 @@ use winit_core::error::{EventLoopError, NotSupportedError, RequestError};
 use winit_core::event::{DeviceId, StartCause, WindowEvent};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask,
+    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents,
     EventLoopProxy as CoreEventLoopProxy, EventLoopProxyProvider,
     OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
@@ -833,7 +833,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
         Ok(Box::new(reader))
     }
 
-    fn set_valid_actions(
+    fn set_actions(
         &self,
         id: DataTransferId,
         actions: &dyn DndActionMask,

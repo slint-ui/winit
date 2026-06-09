@@ -27,7 +27,7 @@ use winit_core::data_transfer::{
 use winit_core::error::{EventLoopError, RequestError};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask, DragIcon,
+    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndAction, DragIcon,
     EventLoopProxy as CoreEventLoopProxy, OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
@@ -39,9 +39,8 @@ use super::cursor::CustomCursor;
 use super::event::dummy_event;
 use super::monitor;
 use crate::ActivationPolicy;
-use crate::app_state::DragState;
 use crate::cursor::image_from_icon;
-use crate::dnd::{DragOperation, PasteboardWriter};
+use crate::dnd::{PasteboardWriter, dnd_actions_to_ns_drag_operation};
 use crate::window::Window;
 
 #[derive(Debug)]
@@ -157,41 +156,30 @@ impl RootActiveEventLoop for ActiveEventLoop {
         Ok(Box::new(pb))
     }
 
-    fn set_valid_actions(
-        &self,
-        id: DataTransferId,
-        actions: &dyn DndActionMask,
-    ) -> Result<(), RequestError> {
-        let Some(drag_state) = self.app_state.drag_state().get() else {
+    fn set_actions(&self, id: DataTransferId, actions: &[DndAction]) -> Result<(), RequestError> {
+        let mut state = self.app_state.drag_state().borrow_mut();
+        let Some(drag_state) = &mut *state else {
             return Err(os_error!(UnknownDataTransfer(id)).into());
         };
 
         if drag_state.id != id {
             return Err(os_error!(UnknownDataTransfer(id)).into());
         }
-        let new_drag_state = DragState { id, valid_operations: DragOperation::from_dyn(actions) };
 
-        self.app_state.drag_state().set(Some(new_drag_state));
+        drag_state.valid_actions.clear();
+        drag_state.valid_actions.extend_from_slice(actions);
 
         Ok(())
-    }
-
-    fn valid_actions(&self, id: DataTransferId) -> Result<Box<dyn DndActionMask>, RequestError> {
-        self.app_state
-            .pasteboards()
-            .source_operation_mask(id)
-            .map(|ops| Box::new(ops) as _)
-            .ok_or_else(|| os_error!(UnknownDataTransfer(id)).into())
     }
 
     fn start_drag(
         &self,
         source: WindowId,
         send_data: Box<dyn DataTransferSend>,
-        action_mask: &dyn DndActionMask,
+        actions: &[DndAction],
         icon: Option<DragIcon>,
     ) -> Result<DataTransferId, RequestError> {
-        let drag_operation = DragOperation::from_dyn(action_mask);
+        let drag_operation = dnd_actions_to_ns_drag_operation(actions);
 
         self.app_state
             .with_window_delegate_on_main(source, move |delegate| {

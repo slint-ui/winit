@@ -12,7 +12,7 @@ use smol_str::SmolStr;
 use crate::Instant;
 use crate::data_transfer::DataTransferId;
 use crate::error::RequestError;
-use crate::event_loop::AsyncRequestSerial;
+use crate::event_loop::{AsyncRequestSerial, DndAction};
 use crate::keyboard::{self, ModifiersKeyState, ModifiersKeys, ModifiersState};
 #[cfg(doc)]
 use crate::window::Window;
@@ -104,11 +104,30 @@ pub enum WindowEvent {
     DragDropped {
         /// Data transfer object specifying the ID and available types.
         id: DataTransferId,
+        /// The drag action proposed by the OS, based on the actions supplied in
+        /// [`ActiveEventLoop::set_actions`], the actions available on the source,
+        /// and the held modifier keys.
+        proposed_action: DndAction,
     },
-    /// The file drag operation has been cancelled or left the window.
+    /// The file drag operation has been canceled or left the window.
     DragLeft {
         /// Data transfer object specifying the ID and available types.
         id: DataTransferId,
+    },
+    /// A drag operation started with `start_drag` has completed.
+    ///
+    /// If `selected_operation` is empty, then the drag was canceled.
+    OutgoingDragEnded {
+        /// The ID returned from `start_drag`
+        id: DataTransferId,
+        /// The operation selected by the drop destination.
+        ///
+        /// If `None`, the operation was canceled.
+        ///
+        /// The operation being canceled does _not_ mean that the target application
+        /// did not receive any data. It simply means that the source application
+        /// does not need to take any further action.
+        action: Option<DndAction>,
     },
 
     /// The window gained or lost focus.
@@ -1559,6 +1578,7 @@ mod tests {
             use crate::event::Ime::Enabled;
             use crate::event::WindowEvent::*;
             use crate::event::{PointerKind, PointerSource};
+            use crate::event_loop::DndAction;
             use crate::data_transfer::DataTransferId;
 
             let dnd_data = DataTransferId::from_raw(123);
@@ -1570,7 +1590,7 @@ mod tests {
             with_window_event(SurfaceResized((0, 0).into()));
             with_window_event(DragEntered { id: dnd_data, position: None });
             with_window_event(DragPosition { id: dnd_data, position: (0, 0).into() });
-            with_window_event(DragDropped { id: dnd_data });
+            with_window_event(DragDropped { id: dnd_data, operation: Some(DndAction::Copy) });
             with_window_event(DragLeft { id: dnd_data });
             with_window_event(Ime(Enabled));
             with_window_event(PointerMoved {

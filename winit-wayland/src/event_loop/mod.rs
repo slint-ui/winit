@@ -735,7 +735,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
         Ok(Box::new(state.clone()))
     }
 
-    fn set_valid_actions(
+    fn set_actions(
         &self,
         id: DataTransferId,
         mask: &dyn DndActionMask,

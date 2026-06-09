@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::data_transfer::{DataTransferId, DataTransferSendBuilder, TypeHint, TypedData};
 use winit::event::{MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, DndActions, DragIcon, EventLoop};
+use winit::event_loop::{ActiveEventLoop, DndAction, DragIcon, EventLoop};
 use winit::icon::{Icon, RgbaIcon};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -132,7 +132,7 @@ impl ApplicationHandler for Application {
                                 }
                             })
                             .build(),
-                        &DndActions::All,
+                        &[DndAction::Move, DndAction::Copy],
                         Some(DragIcon { icon, offset }),
                     );
 
@@ -225,11 +225,11 @@ impl ApplicationHandler for Application {
                 let valid_type = valid_types.find(|ty| data_transfer.has_type(ty));
 
                 let Some(type_) = valid_type else {
-                    event_loop.set_valid_actions(id, &DndActions::none()).unwrap();
+                    event_loop.set_actions(id, &[]).unwrap();
                     return;
                 };
 
-                event_loop.set_valid_actions(id, &DndActions::all()).unwrap();
+                event_loop.set_actions(id, &[DndAction::Move, DndAction::Copy]).unwrap();
 
                 self.last_dnd_fetch = event_loop.fetch_data_transfer(id, &type_).ok();
 
@@ -242,6 +242,9 @@ impl ApplicationHandler for Application {
                     },
                     _ => {},
                 }
+            },
+            WindowEvent::OutgoingDragEnded { .. } => {
+                info!("{event:?}");
             },
             WindowEvent::RedrawRequested => {
                 let window = self.window.as_ref().unwrap();

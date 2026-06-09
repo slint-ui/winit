@@ -62,7 +62,9 @@ use super::util::cgerr;
 use super::view::WinitView;
 use super::window::{WinitPanel, WinitWindow, window_id};
 use crate::app_state::DragState;
-use crate::dnd::DragOperation;
+use crate::dnd::{
+    dnd_action_to_ns_drag_operation, ns_drag_operation_to_dnd_action, preferred_drag_operation,
+};
 use crate::{OptionAsAlt, WindowAttributesMacOS, WindowExtMacOS};
 
 #[derive(Debug)]
@@ -368,7 +370,7 @@ define_class!(
             _: &NSDraggingSession,
             _: NSDraggingContext,
         ) -> NSDragOperation {
-            self.view().drag_operations().0
+            self.view().drag_operations()
         }
 
         #[unsafe(method(draggingSession:endedAtPoint:operation:))]
@@ -376,9 +378,19 @@ define_class!(
             &self,
             session: &NSDraggingSession,
             _: NSPoint,
-            _: NSDragOperation,
+            operation: NSDragOperation,
         ) {
+            self.queue_event(WindowEvent::OutgoingDragEnded {
+                id: DataTransferId::from_raw(session.draggingSequenceNumber() as i64),
+                action: ns_drag_operation_to_dnd_action(operation),
+            });
+
             self.view().clear_dragging_session(session);
+        }
+
+        #[unsafe(method(ignoreModifierKeysForDraggingSession:))]
+        fn ignore_modifier_keys_for_dragging_session(&self, session: &NSDraggingSession) -> bool {
+            false
         }
     }
 
@@ -396,27 +408,31 @@ define_class!(
 
             let vars = self.ivars();
 
+            let source_operations = sender.draggingSourceOperationMask();
+            // let operations = ns_drag_operation_to_dnd_actions(source_operations);
+
             let transfer_id = DataTransferId::from_raw(sender.draggingSequenceNumber() as i64);
             vars.app_state.pasteboards().insert(transfer_id, &pb);
-            vars.app_state
-                .pasteboards()
-                .set_source_operation_mask(transfer_id, sender.draggingSourceOperationMask());
 
-            let valid_operations = NSDragOperation::empty();
-            vars.app_state.drag_state().set(Some(DragState {
-                id: transfer_id,
-                valid_operations: DragOperation(valid_operations),
-            }));
+            vars.app_state
+                .drag_state()
+                .replace(Some(DragState { id: transfer_id, valid_actions: vec![] }));
 
             self.queue_event(WindowEvent::DragEntered {
                 id: transfer_id,
                 position: Some(position),
+                // operations: Some(operations),
             });
 
-            vars.app_state
-                .drag_state()
-                .get()
-                .map_or(NSDragOperation::empty(), |state| state.valid_operations.0)
+            let drag_state = vars.app_state.drag_state().borrow();
+
+            drag_state
+                .as_ref()
+                .and_then(|drag_state| {
+                    preferred_drag_operation(source_operations, &drag_state.valid_actions)
+                })
+                .map(dnd_action_to_ns_drag_operation)
+                .unwrap_or(NSDragOperation::empty())
         }
 
         #[unsafe(method(wantsPeriodicDraggingUpdates))]
@@ -433,28 +449,39 @@ define_class!(
 
             let vars = self.ivars();
 
-            let Some(DragState { id: transfer_id, .. }) = vars.app_state.drag_state().get() else {
+            let Some(transfer_id) =
+                vars.app_state.drag_state().borrow().as_ref().map(|state| state.id)
+            else {
                 return NSDragOperation::empty();
             };
 
             let pb = sender.draggingPasteboard();
 
+            let source_operations = sender.draggingSourceOperationMask();
+            // let operations = ns_drag_operation_to_dnd_actions(source_operations);
+
             vars.app_state.pasteboards().set_pasteboard(transfer_id, &pb);
-            vars.app_state
-                .pasteboards()
-                .set_source_operation_mask(transfer_id, sender.draggingSourceOperationMask());
 
             let dl = sender.draggingLocation();
             let dl = self.view().convertPoint_fromView(dl, None);
             let position =
                 LogicalPosition::<f64>::from((dl.x, dl.y)).to_physical(self.scale_factor());
 
-            self.queue_event(WindowEvent::DragPosition { id: transfer_id, position });
+            self.queue_event(WindowEvent::DragPosition {
+                id: transfer_id,
+                position,
+                // operations: Some(operations),
+            });
 
-            vars.app_state
-                .drag_state()
-                .get()
-                .map_or(NSDragOperation::empty(), |state| state.valid_operations.0)
+            let drag_state = vars.app_state.drag_state().borrow();
+
+            drag_state
+                .as_ref()
+                .and_then(|drag_state| {
+                    preferred_drag_operation(source_operations, &drag_state.valid_actions)
+                })
+                .map(dnd_action_to_ns_drag_operation)
+                .unwrap_or(NSDragOperation::empty())
         }
 
         /// Invoked when the image is released
@@ -471,16 +498,18 @@ define_class!(
 
             let vars = self.ivars();
 
-            let Some(DragState { id: transfer_id, .. }) = vars.app_state.drag_state().get() else {
+            let Some(transfer_id) =
+                vars.app_state.drag_state().borrow().as_ref().map(|state| state.id)
+            else {
                 return false.into();
             };
 
             let pb = sender.draggingPasteboard();
 
+            let source_operations = sender.draggingSourceOperationMask();
+            // let operations = ns_drag_operation_to_dnd_actions(source_operations);
+
             vars.app_state.pasteboards().set_pasteboard(transfer_id, &pb);
-            vars.app_state
-                .pasteboards()
-                .set_source_operation_mask(transfer_id, sender.draggingSourceOperationMask());
 
             let dl = sender.draggingLocation();
             let dl = self.view().convertPoint_fromView(dl, None);
@@ -488,15 +517,21 @@ define_class!(
                 LogicalPosition::<f64>::from((dl.x, dl.y)).to_physical(self.scale_factor());
 
             self.queue_event(WindowEvent::DragPosition { id: transfer_id, position });
-            self.queue_event(WindowEvent::DragDropped { id: transfer_id });
 
-            let valid_operations = vars
-                .app_state
-                .drag_state()
-                .get()
-                .map_or(NSDragOperation::empty(), |state| state.valid_operations.0);
+            let preferred_operation =
+                vars.app_state.drag_state().borrow().as_ref().and_then(|drag_state| {
+                    preferred_drag_operation(source_operations, &drag_state.valid_actions)
+                });
 
-            sender.draggingSourceOperationMask().intersects(valid_operations)
+            if let Some(operation) = preferred_operation {
+                self.queue_event(WindowEvent::DragDropped { id: transfer_id, proposed_action });
+
+                true
+            } else {
+                self.queue_event(WindowEvent::DragLeft { id: transfer_id });
+
+                false
+            }
         }
 
         /// Invoked when the dragging operation is complete
@@ -506,7 +541,7 @@ define_class!(
             let vars = self.ivars();
 
             vars.app_state.pasteboards().remove_deloaded_pasteboards();
-            vars.app_state.drag_state().set(None);
+            vars.app_state.drag_state().take();
         }
 
         /// Invoked when the dragging operation is cancelled
@@ -515,7 +550,10 @@ define_class!(
             let _entered = debug_span!("draggingExited:").entered();
 
             let vars = self.ivars();
-            let Some(DragState { id: transfer_id, .. }) = vars.app_state.drag_state().get() else {
+
+            let Some(transfer_id) =
+                vars.app_state.drag_state().borrow().as_ref().map(|state| state.id)
+            else {
                 return;
             };
 
@@ -528,12 +566,16 @@ define_class!(
                 let position =
                     LogicalPosition::<f64>::from((dl.x, dl.y)).to_physical(self.scale_factor());
 
-                self.queue_event(WindowEvent::DragPosition { id: transfer_id, position });
+                self.queue_event(WindowEvent::DragPosition {
+                    id: transfer_id,
+                    position,
+                    // operations: Some(operations),
+                });
             }
 
             self.queue_event(WindowEvent::DragLeft { id: transfer_id });
 
-            vars.app_state.drag_state().set(None);
+            vars.app_state.drag_state().take();
         }
     }
 

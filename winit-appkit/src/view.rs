@@ -8,8 +8,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSCursor, NSDraggingSession, NSEvent, NSEventPhase, NSResponder,
-    NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSApplication, NSCursor, NSDragOperation, NSDraggingSession, NSEvent, NSEventPhase,
+    NSResponder, NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
 };
 use objc2_core_foundation::CGRect;
 use objc2_foundation::{
@@ -32,7 +32,6 @@ use super::event::{
 };
 use super::window::window_id;
 use crate::OptionAsAlt;
-use crate::dnd::DragOperation;
 
 #[derive(Debug)]
 struct CursorState {
@@ -119,7 +118,7 @@ pub struct ViewState {
     dragging_session: RefCell<Option<Retained<NSDraggingSession>>>,
 
     /// This is for a dragging session that we initiated
-    drag_operations: Cell<DragOperation>,
+    drag_operations: Cell<NSDragOperation>,
 
     cursor_state: RefCell<CursorState>,
     ime_position: Cell<NSPoint>,
@@ -788,7 +787,7 @@ impl WinitView {
         let this = mtm.alloc().set_ivars(ViewState {
             app_state: Rc::clone(app_state),
             dragging_session: Default::default(),
-            drag_operations: Cell::new(DragOperation::empty()),
+            drag_operations: Cell::new(NSDragOperation::empty()),
             cursor_state: Default::default(),
             ime_position: Default::default(),
             ime_size: Default::default(),
@@ -1085,20 +1084,20 @@ impl WinitView {
     pub(crate) fn set_dragging_session(
         &self,
         drag: Retained<NSDraggingSession>,
-        action_mask: DragOperation,
+        action_mask: NSDragOperation,
     ) {
         let vars = self.ivars();
         vars.dragging_session.replace(Some(drag));
         vars.drag_operations.set(action_mask);
     }
 
-    pub(crate) fn drag_operations(&self) -> DragOperation {
+    pub(crate) fn drag_operations(&self) -> NSDragOperation {
         self.ivars().drag_operations.get()
     }
 
     pub(crate) fn clear_dragging_session(&self, drag: &NSDraggingSession) -> bool {
         let vars = self.ivars();
-        vars.drag_operations.set(DragOperation::empty());
+        vars.drag_operations.set(NSDragOperation::empty());
         let mut dragging_session = vars.dragging_session.borrow_mut();
         dragging_session
             .take_if(|session| session.draggingSequenceNumber() == drag.draggingSequenceNumber())

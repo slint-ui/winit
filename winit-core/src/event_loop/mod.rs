@@ -146,30 +146,26 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
         )))
     }
 
-    /// Get the set of valid actions for the specified data transfer.
+    /// Set a given set of `DndAction`s as the valid actions for the given [`DataTransferId`],
+    /// if the transfer ID is from an incoming drag-and-drop operation.
     ///
-    /// If the data transfer does not exist or is not from a drag-and-drop operation, will return an
-    /// error.
-    fn valid_actions(&self, id: DataTransferId) -> Result<Box<dyn DndActionMask>, RequestError> {
+    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data
+    /// can be dropped. If the data transfer does not exist or is not from a drag-and-drop
+    /// operation, will return an error.
+    ///
+    /// The set of actions is expected to be ordered by preference.
+    fn set_actions(&self, id: DataTransferId, actions: &[DndAction]) -> Result<(), RequestError> {
         let _ = id;
+        let _ = actions;
         Err(RequestError::NotSupported(NotSupportedError::new(
             DATA_TRANSFER_UNSUPPORTED_ERROR_MESSAGE,
         )))
     }
 
-    /// Set a given `DndActionMask` as the valid actions for the given [`DataTransferId`],
-    /// if the transfer ID is from a drag-and-drop operation.
-    ///
-    /// This allows the OS/compositor to display the correct UI, indicating that the dragged data
-    /// can be dropped. If the data transfer does not exist or is not from a drag-and-drop
-    /// operation, will return an error.
-    fn set_valid_actions(
-        &self,
-        id: DataTransferId,
-        actions: &dyn DndActionMask,
-    ) -> Result<(), RequestError> {
+    /// If the [`DataTransferId`] corresponds to an incoming drag-and-drop operation, return the
+    /// set of available [`DndAction`]s for that operation.
+    fn valid_actions(&self, id: DataTransferId) -> Result<Vec<DndAction>, RequestError> {
         let _ = id;
-        let _ = actions;
         Err(RequestError::NotSupported(NotSupportedError::new(
             DATA_TRANSFER_UNSUPPORTED_ERROR_MESSAGE,
         )))
@@ -183,11 +179,13 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
     ///
     /// ### Arguments
     ///
+    /// - `source` - The ID of the window that initiated the drag operation.
     /// - `send_data` - The data provided by this drag operation. See
     ///   [`DataTransferSendBuilder`](crate::data_transfer::DataTransferSendBuilder).
-    /// - `action_mask` - The set of valid actions for this drag operation. See
-    ///   [`DndActions`](crate::data_transfer::DndActions).
-    /// - `icon` -  icon to show while dragging.
+    /// - `actions` - The set of valid actions for this drag operation. See
+    ///   [`DndAction`](crate::data_transfer::DndAction). On Wayland, this is expected to be ordered
+    ///   by preference.
+    /// - `icon` - The icon to show while dragging.
     ///
     /// Some platforms have a more-expressive way of setting the visual component of a drag
     /// operation. For those platforms, consider using the platform-specific implementation of
@@ -196,12 +194,12 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
         &self,
         source: WindowId,
         send_data: Box<dyn DataTransferSend>,
-        action_mask: &dyn DndActionMask,
+        actions: &[DndAction],
         icon: Option<DragIcon>,
     ) -> Result<DataTransferId, RequestError> {
         let _ = source;
         let _ = send_data;
-        let _ = action_mask;
+        let _ = actions;
         let _ = icon;
         Err(RequestError::NotSupported(NotSupportedError::new(
             DATA_TRANSFER_UNSUPPORTED_ERROR_MESSAGE,
@@ -237,128 +235,52 @@ impl From<Icon> for DragIcon {
     }
 }
 
-/// A mask of valid actions for a drag and drop operation.
+/// The set of available actions for a drag operation.
 ///
-/// Inspired by [the `dropEffect` DOM API](https://developer.mozilla.org/en-US/docs/Web/API/DataTransfer/dropEffect).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum DndActions {
-    /// A specific set of operations.
+/// This is _not_ a bitset, as on some platforms (e.g. Wayland, macOS) the source and/or destination
+/// are expected to provide some kind of order of preference.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DndAction {
+    /// Move the dragged item from the source to the destination.
     ///
-    /// This is limited to the same set of cross-platform actions supported by `dropEffect`.
-    Flags {
-        /// Move the dragged item from the source to the destination.
-        move_: bool,
-        /// Copy the dragged item from the source to the destination.
-        copy: bool,
-        /// A link is established between the source and the destination.
-        link: bool,
-    },
-    /// All actions, including platform-specific ones not represented in `Self::Flags`.
+    /// # Platforms
     ///
-    /// Most commonly used as a default mask, in case the user just wants to support everything.
-    All,
-}
-
-impl DndActions {
-    pub const fn new_copy() -> Self {
-        Self::Flags { move_: false, copy: true, link: false }
-    }
-
-    pub const fn new_move() -> Self {
-        Self::Flags { move_: true, copy: false, link: false }
-    }
-
-    pub const fn new_link() -> Self {
-        Self::Flags { move_: false, copy: false, link: true }
-    }
-
-    pub const fn copy(&self) -> bool {
-        match *self {
-            DndActions::Flags { copy, .. } => copy,
-            DndActions::All => true,
-        }
-    }
-
-    pub const fn move_(&self) -> bool {
-        match *self {
-            DndActions::Flags { move_, .. } => move_,
-            DndActions::All => true,
-        }
-    }
-
-    pub const fn link(&self) -> bool {
-        match *self {
-            DndActions::Flags { link, .. } => link,
-            DndActions::All => true,
-        }
-    }
-
-    pub const fn all() -> Self {
-        Self::All
-    }
-
-    pub const fn none() -> Self {
-        Self::Flags { move_: false, copy: false, link: false }
-    }
-
-    pub const fn any(&self) -> bool {
-        match *self {
-            Self::All => true,
-            Self::Flags { move_, copy, link } => move_ || copy || link,
-        }
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        !self.any()
-    }
-
-    pub const fn intersects(&self, other: &Self) -> bool {
-        self.intersection(other).any()
-    }
-
-    pub const fn intersection(&self, other: &Self) -> Self {
-        match (*self, *other) {
-            (Self::All, other) | (other, Self::All) => other,
-            (
-                Self::Flags { move_: this_move, copy: this_copy, link: this_link },
-                Self::Flags { move_: other_move, copy: other_copy, link: other_link },
-            ) => Self::Flags {
-                move_: this_move && other_move,
-                copy: this_copy && other_copy,
-                link: this_link && other_link,
-            },
-        }
-    }
-}
-
-pub trait DndActionMask: AsAny + fmt::Debug {
-    fn hint(&self) -> DndActions;
-    fn intersection(&self, other: &dyn DndActionMask) -> Box<dyn DndActionMask>;
-    fn is_empty(&self) -> bool;
-
-    fn intersects(&self, other: &dyn DndActionMask) -> bool {
-        !self.intersection(other).is_empty()
-    }
-}
-
-impl_dyn_casting!(DndActionMask);
-
-impl DndActionMask for DndActions {
-    fn hint(&self) -> DndActions {
-        *self
-    }
-
-    fn intersects(&self, other: &dyn DndActionMask) -> bool {
-        self.intersects(&other.hint())
-    }
-
-    fn intersection(&self, other: &dyn DndActionMask) -> Box<dyn DndActionMask> {
-        Box::new(self.intersection(&other.hint()))
-    }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
-    }
+    /// - X11
+    /// - Wayland
+    /// - macOS
+    /// - Windows
+    Move,
+    /// Copy the dragged item from the source to the destination.
+    ///
+    /// # Platforms
+    ///
+    /// - X11
+    /// - Wayland
+    /// - macOS
+    /// - Windows
+    Copy,
+    /// A link is established between the source and the destination.
+    ///
+    /// # Platforms
+    ///
+    /// - macOS
+    /// - Windows
+    /// - X11
+    Link,
+    /// The user will be prompted for what should be done
+    ///
+    /// # Platforms
+    ///
+    /// - Wayland
+    Ask,
+    /// The source and destination will negotiate the drag operation privately
+    ///
+    /// # Platforms
+    ///
+    /// - X11
+    /// - macOS
+    Private,
 }
 
 /// Control the [`ActiveEventLoop`], possibly from a different thread, without referencing it

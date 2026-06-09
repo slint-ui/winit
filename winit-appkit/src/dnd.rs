@@ -2,7 +2,7 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
-use std::ops::{ControlFlow, Deref};
+use std::ops::{BitOr, ControlFlow, Deref};
 use std::rc::Rc;
 
 use objc2::rc::{Retained, Weak};
@@ -17,7 +17,7 @@ use objc2_foundation::{NSArray, NSData, NSObject, NSObjectProtocol, NSString};
 use winit_core::data_transfer::{
     DataTransfer, DataTransferId, DataTransferSend, SendData, TransferType, TypeHint, TypedData,
 };
-use winit_core::event_loop::{DndActionMask, DndActions};
+use winit_core::event_loop::DndAction;
 
 /// A thin wrapper around [`NSPasteboardType`], implementing [`TransferType`].
 #[derive(PartialEq, Eq, Debug, Clone)]
@@ -188,68 +188,45 @@ impl PasteboardTypeSpec {
     }
 }
 
-/// A thin wrapper around [`NSDragOperation`], implementing [`DndActionMask`].
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct DragOperation(pub NSDragOperation);
-
-impl DragOperation {
-    /// An empty set of drag operations
-    pub fn empty() -> Self {
-        Self(NSDragOperation::empty())
-    }
-
-    pub(crate) fn from_dyn(actions: &dyn DndActionMask) -> Self {
-        if let Some(op) = actions.cast_ref::<Self>() {
-            *op
-        } else {
-            match actions.hint() {
-                DndActions::Flags { move_, copy, link } => {
-                    let move_flag =
-                        if move_ { NSDragOperation::Move } else { NSDragOperation::empty() };
-                    let copy_flag =
-                        if copy { NSDragOperation::Copy } else { NSDragOperation::empty() };
-                    let link_flag =
-                        if link { NSDragOperation::Link } else { NSDragOperation::empty() };
-                    Self(move_flag | copy_flag | link_flag)
-                },
-                DndActions::All => Self(NSDragOperation::all()),
-            }
-        }
-    }
-
-    fn intersection(&self, other: &Self) -> Self {
-        Self(self.0.intersection(other.0))
-    }
-
-    fn intersects(&self, other: &Self) -> bool {
-        self.0.intersects(other.0)
+pub fn dnd_action_to_ns_drag_operation(value: DndAction) -> NSDragOperation {
+    match value {
+        DndAction::Copy => NSDragOperation::Copy,
+        DndAction::Move => NSDragOperation::Move,
+        DndAction::Link => NSDragOperation::Link,
+        DndAction::Private => NSDragOperation::Private,
+        _ => NSDragOperation::empty(),
     }
 }
 
-impl DndActionMask for DragOperation {
-    fn hint(&self) -> DndActions {
-        if self.0.is_all() {
-            DndActions::All
-        } else {
-            DndActions::Flags {
-                move_: self.0.contains(NSDragOperation::Move),
-                copy: self.0.contains(NSDragOperation::Copy),
-                link: self.0.contains(NSDragOperation::Link),
-            }
-        }
-    }
+pub fn ns_drag_operation_to_dnd_action(value: NSDragOperation) -> Option<DndAction> {
+    [
+        (NSDragOperation::Copy, DndAction::Copy),
+        (NSDragOperation::Move, DndAction::Move),
+        (NSDragOperation::Link, DndAction::Link),
+        (NSDragOperation::Private, DndAction::Private),
+        // Sometimes the OS returns `Generic`, in which case we just fall back to `Copy`.
+        (NSDragOperation::Generic, DndAction::Copy),
+    ]
+    .into_iter()
+    .find_map(|(appkit, winit)| value.contains(appkit).then_some(winit))
+}
 
-    fn intersection(&self, other: &dyn DndActionMask) -> Box<dyn DndActionMask> {
-        Box::new(self.intersection(&Self::from_dyn(other)))
-    }
+pub fn dnd_actions_to_ns_drag_operation(value: &[DndAction]) -> NSDragOperation {
+    value
+        .iter()
+        .copied()
+        .map(dnd_action_to_ns_drag_operation)
+        .fold(NSDragOperation::empty(), BitOr::bitor)
+}
 
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    fn intersects(&self, other: &dyn DndActionMask) -> bool {
-        self.intersects(&Self::from_dyn(other))
-    }
+pub fn preferred_drag_operation(
+    value: NSDragOperation,
+    preference: &[DndAction],
+) -> Option<DndAction> {
+    preference
+        .iter()
+        .find(|action| value.intersects(dnd_action_to_ns_drag_operation(**action)))
+        .copied()
 }
 
 /// A thin wrapper around [`NSPasteboard`], implementing [`TypedValue`].
@@ -375,54 +352,34 @@ impl TypedData for PasteboardValue {
     }
 }
 
-#[derive(Debug)]
-struct StoredPasteboard {
-    pasteboard: Weak<NSPasteboard>,
-    operation_mask: Option<DragOperation>,
-}
-
 #[derive(Debug, Default)]
 pub struct Pasteboards {
-    inner: RefCell<HashMap<DataTransferId, StoredPasteboard>>,
+    inner: RefCell<HashMap<DataTransferId, Weak<NSPasteboard>>>,
 }
 
 impl Pasteboards {
     pub fn remove_deloaded_pasteboards(&self) {
-        self.inner.borrow_mut().retain(|_, state| state.pasteboard.load().is_some());
+        self.inner.borrow_mut().retain(|_, state| state.load().is_some());
     }
 
     /// If the data transfer exists, update the pasteboard it points to.
     pub fn set_pasteboard(&self, id: DataTransferId, pb: &Retained<NSPasteboard>) {
         let mut inner = self.inner.borrow_mut();
         if let Some(state) = inner.get_mut(&id) {
-            state.pasteboard = Weak::from_retained(pb);
-        }
-    }
-
-    pub fn set_source_operation_mask(&self, id: DataTransferId, operations: NSDragOperation) {
-        let mut inner = self.inner.borrow_mut();
-        if let Some(state) = inner.get_mut(&id) {
-            state.operation_mask = Some(DragOperation(operations));
+            *state = Weak::from_retained(pb);
         }
     }
 
     pub fn insert(&self, transfer_id: DataTransferId, pb: &Retained<NSPasteboard>) {
-        self.inner.borrow_mut().insert(transfer_id, StoredPasteboard {
-            pasteboard: Weak::from_retained(pb),
-            operation_mask: None,
-        });
+        self.inner.borrow_mut().insert(transfer_id, Weak::from_retained(pb));
     }
 
     pub fn get(&self, id: DataTransferId) -> Option<Pasteboard> {
         self.inner
             .borrow()
             .get(&id)
-            .and_then(|state| state.pasteboard.load())
+            .and_then(|state| state.load())
             .map(|pb| Pasteboard::new(id, pb))
-    }
-
-    pub fn source_operation_mask(&self, id: DataTransferId) -> Option<DragOperation> {
-        self.inner.borrow().get(&id).and_then(|state| state.operation_mask)
     }
 }
 
