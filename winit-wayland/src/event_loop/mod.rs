@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::io::Result as IOResult;
+use std::ops::BitOr;
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +22,7 @@ use sctk::reexports::client::{Connection, QueueHandle, globals};
 use sctk::shell::WaylandSurface;
 use tracing::warn;
 use wayland_client::Proxy;
+use wayland_client::protocol::wl_data_device_manager::DndAction as WlDndAction;
 use wayland_client::protocol::wl_shm::Format;
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{CustomCursor as CoreCustomCursor, CustomCursorSource};
@@ -31,14 +33,14 @@ use winit_core::error::{EventLoopError, NotSupportedError, OsError, RequestError
 use winit_core::event::{DeviceEvent, StartCause, SurfaceSizeWriter, WindowEvent};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndActionMask, DragIcon,
+    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndAction, DragIcon,
     OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
 use winit_core::icon::RgbaIcon;
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
 use winit_core::window::Theme;
 
-use crate::dnd::{DndActionSet, MimeData};
+use crate::dnd::{MimeData, dnd_action_winit_to_wl};
 use crate::types::cursor::WaylandCustomCursor;
 use crate::{DragSource, MimeType, image_to_buffer, make_data_transfer_id};
 
@@ -735,11 +737,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
         Ok(Box::new(state.clone()))
     }
 
-    fn set_actions(
-        &self,
-        id: DataTransferId,
-        mask: &dyn DndActionMask,
-    ) -> Result<(), RequestError> {
+    fn set_actions(&self, id: DataTransferId, actions: &[DndAction]) -> Result<(), RequestError> {
         let state = self.state.borrow();
         let Some(state) = state.dnd_state.receive_drag() else {
             return Err(os_error!(UnknownDataTransfer(id)).into());
@@ -749,13 +747,9 @@ impl RootActiveEventLoop for ActiveEventLoop {
             return Err(os_error!(UnknownDataTransfer(id)).into());
         }
 
-        let actions = DndActionSet::from_dyn(mask);
-        state.set_actions(&actions);
-        let accepted_type = if actions.dnd_actions.is_empty() {
-            None
-        } else {
-            state.first_mime_type().map(|mime| mime.to_string())
-        };
+        let any_actions = state.set_actions(actions);
+        let accepted_type =
+            if any_actions { state.first_mime_type().map(|mime| mime.to_string()) } else { None };
         // Some compositors won't even send the "dropped" event if no type
         // has been accepted, so we need to accept _something_ here. The
         // application can accept further types by fetching the data, but
@@ -770,11 +764,15 @@ impl RootActiveEventLoop for ActiveEventLoop {
         &self,
         source: WindowId,
         send_data: Box<dyn DataTransferSend>,
-        action_mask: &dyn DndActionMask,
+        action_mask: &[DndAction],
         icon: Option<DragIcon>,
     ) -> Result<DataTransferId, RequestError> {
         let mut state = self.state.borrow_mut();
-        let action_set = DndActionSet::from_dyn(action_mask);
+        let dnd_actions = action_mask
+            .iter()
+            .copied()
+            .map(dnd_action_winit_to_wl)
+            .fold(WlDndAction::empty(), BitOr::bitor);
 
         let data_device_manager = state
             .data_device_manager_state
@@ -826,7 +824,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
             Some(data_device_manager.create_drag_and_drop_source(
                 &self.queue_handle,
                 mime_types,
-                action_set.dnd_actions,
+                dnd_actions,
             ))
         };
 
@@ -876,6 +874,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
             data_source,
             send_data,
             icon_surface,
+            source,
         ));
 
         Ok(transfer_id)

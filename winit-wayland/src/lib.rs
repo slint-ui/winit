@@ -26,7 +26,6 @@ use sctk::reexports::client::Proxy;
 use sctk::reexports::client::backend::ObjectId;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::shm::slot::{Buffer, CreateBufferError, SlotPool};
-use wayland_client::protocol::wl_data_offer::WlDataOffer;
 use wayland_client::protocol::wl_shm::Format;
 use winit_core::data_transfer::DataTransferId;
 use winit_core::event_loop::ActiveEventLoop as CoreActiveEventLoop;
@@ -46,7 +45,7 @@ mod state;
 mod types;
 mod window;
 
-pub use self::dnd::{DataOffer, DndActionSet, DragSource, MimeData, MimeType};
+pub use self::dnd::{DataOffer, DragSource, MimeData, MimeType};
 pub use self::event_loop::{ActiveEventLoop, EventLoop};
 pub use self::window::Window;
 

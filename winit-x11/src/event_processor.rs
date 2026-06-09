@@ -459,10 +459,11 @@ impl EventProcessor {
                 dnd.init_state(version, source_window, window, types.into()).transfer_id
             };
 
-            app.window_event(&self.target, window_id, WindowEvent::DragEntered {
-                id: transfer_id,
-                position: None,
-            });
+            app.window_event(
+                &self.target,
+                window_id,
+                WindowEvent::DragEntered { id: transfer_id, position: None },
+            );
             return;
         }
 
@@ -522,10 +523,14 @@ impl EventProcessor {
                 state.transfer_id
             };
 
-            app.window_event(&self.target, window_id, WindowEvent::DragPosition {
-                id: transfer_id,
-                position: PhysicalPosition::new(coords.dst_x as f64, coords.dst_y as f64),
-            });
+            app.window_event(
+                &self.target,
+                window_id,
+                WindowEvent::DragPosition {
+                    id: transfer_id,
+                    position: PhysicalPosition::new(coords.dst_x as f64, coords.dst_y as f64),
+                },
+            );
 
             return;
         }
@@ -544,7 +549,12 @@ impl EventProcessor {
                 (source_window, state.transfer_id)
             };
 
-            app.window_event(&self.target, window_id, WindowEvent::DragDropped { id: transfer_id });
+            app.window_event(
+                &self.target,
+                window_id,
+                // TODO
+                WindowEvent::DragDropped { id: transfer_id, proposed_action: None },
+            );
 
             let mut dnd = self.target.dnd.borrow_mut();
 
@@ -563,9 +573,11 @@ impl EventProcessor {
             let Some(state) = &dnd.state else {
                 return;
             };
-            app.window_event(&self.target, window_id, WindowEvent::DragLeft {
-                id: state.transfer_id,
-            });
+            app.window_event(
+                &self.target,
+                window_id,
+                WindowEvent::DragLeft { id: state.transfer_id },
+            );
         }
     }
 
@@ -701,10 +713,14 @@ impl EventProcessor {
                 drop(shared_state_lock);
 
                 let surface_size = Arc::new(Mutex::new(new_surface_size));
-                app.window_event(&self.target, window_id, WindowEvent::ScaleFactorChanged {
-                    scale_factor: new_scale_factor,
-                    surface_size_writer: SurfaceSizeWriter::new(Arc::downgrade(&surface_size)),
-                });
+                app.window_event(
+                    &self.target,
+                    window_id,
+                    WindowEvent::ScaleFactorChanged {
+                        scale_factor: new_scale_factor,
+                        surface_size_writer: SurfaceSizeWriter::new(Arc::downgrade(&surface_size)),
+                    },
+                );
 
                 let new_surface_size = *surface_size.lock().unwrap();
                 drop(surface_size);

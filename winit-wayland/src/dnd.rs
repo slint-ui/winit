@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::ops::Deref;
+use std::ops::{BitOr, Deref};
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ use sctk::data_device_manager::data_offer::{DataOfferHandler, DragOffer};
 use sctk::data_device_manager::data_source::{DataSourceHandler, DragSource as SctkDragSource};
 use sctk::reexports::client::backend::ObjectId;
 use wayland_client::protocol::wl_data_device::WlDataDevice;
-use wayland_client::protocol::wl_data_device_manager::DndAction;
+use wayland_client::protocol::wl_data_device_manager::DndAction as WlDndAction;
 use wayland_client::protocol::wl_data_offer::WlDataOffer;
 use wayland_client::protocol::wl_data_source::WlDataSource;
 use wayland_client::protocol::wl_surface::WlSurface;
@@ -26,7 +26,7 @@ use winit_core::data_transfer::{
     DataTransfer, DataTransferId, DataTransferSend, SendData, TransferType, TypeHint, TypedData,
 };
 use winit_core::event::WindowEvent;
-use winit_core::event_loop::{DndAction, DndActionMask};
+use winit_core::event_loop::DndAction;
 use winit_core::window::WindowId;
 
 use crate::make_data_transfer_id;
@@ -125,7 +125,19 @@ impl DataSourceHandler for WinitState {
         let _ = source;
         let _ = qh;
         let _ = conn;
-        // TODO: Send message to window.
+
+        let Some(current_drag) = self.dnd_state.send_drag() else {
+            return;
+        };
+
+        let window_id = current_drag.window_id;
+        let id = current_drag.data_transfer_id;
+        let selected_action = current_drag.selected_action;
+
+        self.events_sink.push_window_event(
+            WindowEvent::OutgoingDragEnded { id, action: dnd_action_wl_to_winit(selected_action) },
+            window_id,
+        );
     }
 
     fn dnd_finished(
@@ -137,7 +149,6 @@ impl DataSourceHandler for WinitState {
         let _ = source;
         let _ = qh;
         let _ = conn;
-        // TODO: Send message to window.
         self.dnd_state.clear_send_drag();
     }
 
@@ -146,13 +157,14 @@ impl DataSourceHandler for WinitState {
         conn: &Connection,
         qh: &QueueHandle<Self>,
         source: &WlDataSource,
-        action: DndAction,
+        action: WlDndAction,
     ) {
         let _ = action;
         let _ = source;
         let _ = qh;
         let _ = conn;
-        // TODO: Send message to window
+
+        self.dnd_state.set_target_drag_action(action);
     }
 }
 
@@ -431,16 +443,34 @@ impl TypedData for MimeData {
 #[derive(Debug, Clone)]
 pub struct DataOffer {
     mime_types: Arc<[MimeType]>,
-    // TODO: Internal drag-and-drop.
     data: WlDataOffer,
+    available_actions: WlDndAction,
     data_device_id: ObjectId,
     serial: u32,
     window_id: WindowId,
 }
 
+pub(crate) fn dnd_action_winit_to_wl(winit: DndAction) -> WlDndAction {
+    match winit {
+        DndAction::Move => WlDndAction::Move,
+        DndAction::Copy => WlDndAction::Copy,
+        DndAction::Ask => WlDndAction::Ask,
+        _ => WlDndAction::empty(),
+    }
+}
+
+pub(crate) fn dnd_action_wl_to_winit(wl: WlDndAction) -> Option<DndAction> {
+    match wl {
+        WlDndAction::Move => Some(DndAction::Move),
+        WlDndAction::Copy => Some(DndAction::Copy),
+        WlDndAction::Ask => Some(DndAction::Ask),
+        _ => None,
+    }
+}
+
 impl DataOffer {
     pub(crate) fn transfer_id(&self) -> DataTransferId {
-        make_data_transfer_id(self.data_device_id, self.serial)
+        make_data_transfer_id(self.data_device_id.clone(), self.serial)
     }
 
     pub(crate) fn first_mime_type(&self) -> Option<&MimeType> {
@@ -455,8 +485,23 @@ impl DataOffer {
         self.window_id
     }
 
-    pub(crate) fn set_actions(&self, action_set: &DndActionSet) {
-        self.data.set_actions(action_set.dnd_actions, action_set.preferred_action());
+    pub(crate) fn set_actions(&self, action_set: &[DndAction]) -> bool {
+        let preferred_action = action_set.iter().find_map(|winit| {
+            let wl = dnd_action_winit_to_wl(*winit);
+            self.available_actions.intersects(wl).then_some(wl)
+        });
+
+        let any = preferred_action.is_some();
+
+        let all_actions = action_set
+            .iter()
+            .copied()
+            .map(dnd_action_winit_to_wl)
+            .fold(WlDndAction::empty(), BitOr::bitor);
+
+        self.data.set_actions(all_actions, preferred_action.unwrap_or(WlDndAction::empty()));
+
+        any
     }
 
     pub(crate) fn find_type_dyn<'a>(&'a self, type_: &'a dyn TransferType) -> Option<&'a MimeType> {
@@ -493,7 +538,7 @@ impl DataTransfer for DataOffer {
 /// transfer operation, along with the data that the source represents
 #[derive(Debug)]
 pub struct DragSource {
-    _data_transfer_id: DataTransferId,
+    pub(crate) data_transfer_id: DataTransferId,
     /// The `WlDataSource` generated from `data`.
     ///
     /// This is stored internally, as if this source is dropped then the
@@ -502,7 +547,9 @@ pub struct DragSource {
     /// external applications.
     _data_source: Option<SctkDragSource>,
     /// The supplied [`DataTransferSend`].
-    data: Box<dyn DataTransferSend>,
+    pub(crate) data: Box<dyn DataTransferSend>,
+    pub(crate) selected_action: WlDndAction,
+    pub(crate) window_id: WindowId,
     /// (Optionally) an icon for the drag-and-drop operation.
     _icon: Option<WlSurface>,
 }
@@ -513,8 +560,16 @@ impl DragSource {
         data_source: Option<SctkDragSource>,
         data: Box<dyn DataTransferSend>,
         icon: Option<WlSurface>,
+        window_id: WindowId,
     ) -> Self {
-        Self { _data_transfer_id: data_transfer_id, _data_source: data_source, data, _icon: icon }
+        Self {
+            data_transfer_id,
+            _data_source: data_source,
+            data,
+            selected_action: WlDndAction::None,
+            window_id,
+            _icon: icon,
+        }
     }
 
     /// Per-type data to be sent. See [`DataTransferSend`].
@@ -530,104 +585,6 @@ pub struct DndState {
     send_drag: Option<DragSource>,
 }
 
-/// The set of actions supported on a drag operation.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct DndActionSet {
-    /// The set of available actions.
-    pub dnd_actions: DndAction,
-    /// If supplied, the preferred action. If `None`, will be
-    /// determined from `dnd_actions`. In order of preference:
-    ///
-    /// - [`DndAction::Move`]
-    /// - [`DndAction::Copy`]
-    /// - [`DndAction::Ask`]
-    pub preferred_action: Option<DndAction>,
-}
-
-impl From<DndAction> for DndActionSet {
-    fn from(value: DndAction) -> Self {
-        Self { dnd_actions: value, preferred_action: None }
-    }
-}
-
-fn guess_preferred_action(action: DndAction) -> DndAction {
-    [DndAction::Move, DndAction::Copy, DndAction::Ask]
-        .into_iter()
-        .find(|preferred| preferred.intersects(action))
-        .unwrap_or(DndAction::empty())
-}
-
-impl DndActionSet {
-    /// A new, empty `DndActionSet`.
-    pub fn empty() -> Self {
-        Self { dnd_actions: DndAction::empty(), preferred_action: None }
-    }
-
-    pub(crate) fn from_dyn(mask: &dyn DndActionMask) -> Self {
-        mask.cast_ref::<Self>().copied().unwrap_or_else(|| mask.hint().into())
-    }
-
-    /// Get the preferred action, or guess it from `dnd_actions`. In order of preference:
-    ///
-    /// - [`DndAction::Move`]
-    /// - [`DndAction::Copy`]
-    /// - [`DndAction::Ask`]
-    pub fn preferred_action(&self) -> DndAction {
-        self.preferred_action.unwrap_or_else(|| guess_preferred_action(self.dnd_actions))
-    }
-
-    /// Get the intersection of this action set with another action set.
-    pub fn intersection(&self, other: &Self) -> Self {
-        let preferred_action = match (self.preferred_action, other.preferred_action) {
-            (Some(this_pref), Some(other_pref)) if this_pref.intersects(other_pref) => {
-                Some(this_pref.intersection(other_pref))
-            },
-            (Some(pref), None) | (None, Some(pref)) => Some(pref),
-            // If the preferences do not intersect, calculate it from the actions.
-            _ => None,
-        };
-
-        let dnd_actions = self.dnd_actions.intersection(other.dnd_actions);
-
-        Self { dnd_actions, preferred_action }
-    }
-}
-
-impl DndActionMask for DndActionSet {
-    fn hint(&self) -> DndAction {
-        if self.dnd_actions.is_all() {
-            DndAction::All
-        } else {
-            DndAction::Flags {
-                move_: self.dnd_actions.contains(DndAction::Move),
-                copy: self.dnd_actions.contains(DndAction::Copy),
-                link: false,
-            }
-        }
-    }
-
-    fn intersection(&self, other: &dyn DndActionMask) -> Box<dyn DndActionMask> {
-        Box::new(self.intersection(&Self::from_dyn(other)))
-    }
-
-    fn is_empty(&self) -> bool {
-        self.dnd_actions.is_empty()
-    }
-
-    fn intersects(&self, other: &dyn DndActionMask) -> bool {
-        !self.intersection(&Self::from_dyn(other)).is_empty()
-    }
-}
-
-impl From<DndAction> for DndActionSet {
-    fn from(value: DndAction) -> Self {
-        let copy_flag = if value.copy() { DndAction::Copy } else { DndAction::empty() };
-        let move_flag = if value.move_() { DndAction::Move } else { DndAction::empty() };
-
-        DndActionSet { dnd_actions: copy_flag | move_flag, preferred_action: None }
-    }
-}
-
 impl DndState {
     pub(crate) fn receive_drag(&self) -> Option<&DataOffer> {
         self.receive_drag.as_ref()
@@ -635,6 +592,16 @@ impl DndState {
 
     pub(crate) fn set_send_drag(&mut self, source: DragSource) {
         self.send_drag = Some(source);
+    }
+
+    pub(crate) fn send_drag(&self) -> Option<&DragSource> {
+        self.send_drag.as_ref()
+    }
+
+    pub(crate) fn set_target_drag_action(&mut self, action: WlDndAction) {
+        if let Some(source) = &mut self.send_drag {
+            source.selected_action = action;
+        }
     }
 
     /// Returns `true` if a drag operation was in progress, `false` if no drag operation was in
@@ -654,7 +621,7 @@ impl DataOfferHandler for WinitState {
         conn: &Connection,
         qh: &QueueHandle<Self>,
         offer: &mut DragOffer,
-        actions: DndAction,
+        actions: WlDndAction,
     ) {
         let _ = actions;
         let _ = offer;
@@ -668,13 +635,12 @@ impl DataOfferHandler for WinitState {
         conn: &Connection,
         qh: &QueueHandle<Self>,
         offer: &mut DragOffer,
-        actions: DndAction,
+        actions: WlDndAction,
     ) {
         let _ = actions;
         let _ = offer;
         let _ = qh;
         let _ = conn;
-        // Not implemented, but required for `DataDeviceHandler`.
     }
 }
 
@@ -704,13 +670,16 @@ impl DataDeviceHandler for WinitState {
                 .map(|str| MimeType::parse(str.clone()))
                 .collect::<Vec<_>>()
                 .into(),
+            available_actions: drag.source_actions,
             serial: drag.serial,
             data_device_id: data_device.id(),
             data: drag.inner().clone(),
             window_id,
         });
 
-        current_drag.set_actions(&DndActionSet::empty());
+        current_drag.set_actions(&[]);
+
+        let id = current_drag.transfer_id();
 
         self.dnd_state.receive_drag = Some(current_drag);
 
@@ -723,7 +692,7 @@ impl DataDeviceHandler for WinitState {
         let position: PhysicalPosition<f64> = LogicalPosition::new(x, y).to_physical(scale_factor);
 
         self.events_sink.push_window_event(
-            WindowEvent::DragEntered { id: current_drag.transfer_id(), position: Some(position) },
+            WindowEvent::DragEntered { id, position: Some(position) },
             window_id,
         );
     }
@@ -810,12 +779,31 @@ impl DataDeviceHandler for WinitState {
 
         let window_id = crate::make_wid(&drag.surface);
 
+        // `selected_action` should only contain a single flag, but we check with `contains`
+        // just in case we or the compositor misunderstood the spec.
+        let proposed_action = if drag.selected_action.contains(WlDndAction::Move) {
+            Some(DndAction::Move)
+        } else if drag.selected_action.contains(WlDndAction::Copy) {
+            Some(DndAction::Copy)
+        } else if drag.selected_action.contains(WlDndAction::Ask) {
+            Some(DndAction::Ask)
+        } else {
+            None
+        };
+
         self.events_sink.push_window_event(
-            WindowEvent::DragDropped { id: current_drag.transfer_id() },
+            WindowEvent::DragDropped { id: current_drag.transfer_id(), proposed_action },
             window_id,
         );
 
         self.dnd_state.receive_drag = None;
+
+        if let Some(drag) = data.drag_offer() {
+            drag.destroy();
+        }
+        if let Some(selection) = data.selection_offer() {
+            selection.destroy();
+        }
     }
 }
 

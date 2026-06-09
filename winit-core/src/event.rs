@@ -107,7 +107,11 @@ pub enum WindowEvent {
         /// The drag action proposed by the OS, based on the actions supplied in
         /// [`ActiveEventLoop::set_actions`], the actions available on the source,
         /// and the held modifier keys.
-        proposed_action: DndAction,
+        ///
+        /// This may be `None` if the backend has not supplied a valid action. This is different
+        /// from the drag being canceled: the drag completed successfully, we just don't know
+        /// what action was selected.
+        proposed_action: Option<DndAction>,
     },
     /// The file drag operation has been canceled or left the window.
     DragLeft {
@@ -1590,7 +1594,7 @@ mod tests {
             with_window_event(SurfaceResized((0, 0).into()));
             with_window_event(DragEntered { id: dnd_data, position: None });
             with_window_event(DragPosition { id: dnd_data, position: (0, 0).into() });
-            with_window_event(DragDropped { id: dnd_data, operation: Some(DndAction::Copy) });
+            with_window_event(DragDropped { id: dnd_data, proposed_action: Some(DndAction::Copy) });
             with_window_event(DragLeft { id: dnd_data });
             with_window_event(Ime(Enabled));
             with_window_event(PointerMoved {
@@ -1685,24 +1689,24 @@ mod tests {
         const TILT_TO_ANGLE: &[(TabletToolTilt, TabletToolAngle)] = &[
             (TabletToolTilt { x: 0, y: 0 }, TabletToolAngle { altitude: FRAC_PI_2, azimuth: 0. }),
             (TabletToolTilt { x: 0, y: 90 }, TabletToolAngle { altitude: 0., azimuth: FRAC_PI_2 }),
-            (TabletToolTilt { x: 0, y: -90 }, TabletToolAngle {
-                altitude: 0.,
-                azimuth: 3. * FRAC_PI_2,
-            }),
+            (
+                TabletToolTilt { x: 0, y: -90 },
+                TabletToolAngle { altitude: 0., azimuth: 3. * FRAC_PI_2 },
+            ),
             (TabletToolTilt { x: 90, y: 0 }, TabletToolAngle { altitude: 0., azimuth: 0. }),
             (TabletToolTilt { x: 90, y: 90 }, TabletToolAngle { altitude: 0., azimuth: 0. }),
             (TabletToolTilt { x: 90, y: -90 }, TabletToolAngle { altitude: 0., azimuth: 0. }),
             (TabletToolTilt { x: -90, y: 0 }, TabletToolAngle { altitude: 0., azimuth: PI }),
             (TabletToolTilt { x: -90, y: 90 }, TabletToolAngle { altitude: 0., azimuth: 0. }),
             (TabletToolTilt { x: -90, y: -90 }, TabletToolAngle { altitude: 0., azimuth: 0. }),
-            (TabletToolTilt { x: 0, y: 45 }, TabletToolAngle {
-                altitude: FRAC_PI_4,
-                azimuth: FRAC_PI_2,
-            }),
-            (TabletToolTilt { x: 0, y: -45 }, TabletToolAngle {
-                altitude: FRAC_PI_4,
-                azimuth: 3. * FRAC_PI_2,
-            }),
+            (
+                TabletToolTilt { x: 0, y: 45 },
+                TabletToolAngle { altitude: FRAC_PI_4, azimuth: FRAC_PI_2 },
+            ),
+            (
+                TabletToolTilt { x: 0, y: -45 },
+                TabletToolAngle { altitude: FRAC_PI_4, azimuth: 3. * FRAC_PI_2 },
+            ),
             (TabletToolTilt { x: 45, y: 0 }, TabletToolAngle { altitude: FRAC_PI_4, azimuth: 0. }),
             (TabletToolTilt { x: -45, y: 0 }, TabletToolAngle { altitude: FRAC_PI_4, azimuth: PI }),
         ];
@@ -1717,20 +1721,20 @@ mod tests {
             (TabletToolAngle { altitude: FRAC_PI_4, azimuth: 0. }, TabletToolTilt { x: 45, y: 0 }),
             (TabletToolAngle { altitude: FRAC_PI_2, azimuth: 0. }, TabletToolTilt { x: 0, y: 0 }),
             (TabletToolAngle { altitude: 0., azimuth: FRAC_PI_2 }, TabletToolTilt { x: 0, y: 90 }),
-            (TabletToolAngle { altitude: FRAC_PI_4, azimuth: FRAC_PI_2 }, TabletToolTilt {
-                x: 0,
-                y: 45,
-            }),
+            (
+                TabletToolAngle { altitude: FRAC_PI_4, azimuth: FRAC_PI_2 },
+                TabletToolTilt { x: 0, y: 45 },
+            ),
             (TabletToolAngle { altitude: 0., azimuth: PI }, TabletToolTilt { x: -90, y: 0 }),
             (TabletToolAngle { altitude: FRAC_PI_4, azimuth: PI }, TabletToolTilt { x: -45, y: 0 }),
-            (TabletToolAngle { altitude: 0., azimuth: 3. * FRAC_PI_2 }, TabletToolTilt {
-                x: 0,
-                y: -90,
-            }),
-            (TabletToolAngle { altitude: FRAC_PI_4, azimuth: 3. * FRAC_PI_2 }, TabletToolTilt {
-                x: 0,
-                y: -45,
-            }),
+            (
+                TabletToolAngle { altitude: 0., azimuth: 3. * FRAC_PI_2 },
+                TabletToolTilt { x: 0, y: -90 },
+            ),
+            (
+                TabletToolAngle { altitude: FRAC_PI_4, azimuth: 3. * FRAC_PI_2 },
+                TabletToolTilt { x: 0, y: -45 },
+            ),
         ];
 
         for (angle, tilt) in ANGLE_TO_TILT {
