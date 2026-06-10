@@ -387,11 +387,6 @@ define_class!(
 
             self.view().clear_dragging_session(session);
         }
-
-        #[unsafe(method(ignoreModifierKeysForDraggingSession:))]
-        fn ignore_modifier_keys_for_dragging_session(&self, session: &NSDraggingSession) -> bool {
-            false
-        }
     }
 
     unsafe impl NSDraggingDestination for WindowDelegate {
@@ -518,12 +513,12 @@ define_class!(
 
             self.queue_event(WindowEvent::DragPosition { id: transfer_id, position });
 
-            let preferred_operation =
+            let proposed_action =
                 vars.app_state.drag_state().borrow().as_ref().and_then(|drag_state| {
                     preferred_drag_operation(source_operations, &drag_state.valid_actions)
                 });
 
-            if let Some(operation) = preferred_operation {
+            if let Some(proposed_action) = proposed_action {
                 self.queue_event(WindowEvent::DragDropped { id: transfer_id, proposed_action });
 
                 true
