@@ -518,15 +518,12 @@ define_class!(
                     preferred_drag_operation(source_operations, &drag_state.valid_actions)
                 });
 
-            if let Some(proposed_action) = proposed_action {
-                self.queue_event(WindowEvent::DragDropped { id: transfer_id, proposed_action });
+            self.queue_event(WindowEvent::DragDropped { id: transfer_id, proposed_action });
 
-                true
-            } else {
-                self.queue_event(WindowEvent::DragLeft { id: transfer_id });
-
-                false
-            }
+            // We assume that if the OS has sent `perform_drag_operation`, that the drag succeeded.
+            // We may want to extend this API in the future to allow signalling that the final drop
+            // failed.
+            true
         }
 
         /// Invoked when the dragging operation is complete
