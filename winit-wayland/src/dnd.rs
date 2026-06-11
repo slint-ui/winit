@@ -542,10 +542,8 @@ pub struct DragSource {
     /// The `WlDataSource` generated from `data`.
     ///
     /// This is stored internally, as if this source is dropped then the
-    /// drag operation will be cancelled. If this is `None`, then this is
-    /// a purely-internal data source that will not be transferred to
-    /// external applications.
-    _data_source: Option<SctkDragSource>,
+    /// drag operation will be cancelled.
+    _data_source: SctkDragSource,
     /// The supplied [`DataTransferSend`].
     pub(crate) data: Box<dyn DataTransferSend>,
     pub(crate) selected_action: WlDndAction,
@@ -557,7 +555,7 @@ pub struct DragSource {
 impl DragSource {
     pub(crate) fn new(
         data_transfer_id: DataTransferId,
-        data_source: Option<SctkDragSource>,
+        data_source: SctkDragSource,
         data: Box<dyn DataTransferSend>,
         icon: Option<WlSurface>,
         window_id: WindowId,

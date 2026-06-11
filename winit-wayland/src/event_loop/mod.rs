@@ -809,24 +809,20 @@ impl RootActiveEventLoop for ActiveEventLoop {
             // TODO: Seems like a footgun that this requires a pointer serial
             .latest_button_serial();
 
-        let data_source = if send_data.is_internal_only() {
-            None
-        } else {
-            let mut mime_types = Vec::new();
-            send_data.for_each_available_type(&mut |ty_| {
-                for mime in MimeType::from_dyn(ty_) {
-                    mime_types.push(mime);
-                }
+        let mut mime_types = Vec::new();
+        send_data.for_each_available_type(&mut |ty_| {
+            for mime in MimeType::from_dyn(ty_) {
+                mime_types.push(mime);
+            }
 
-                std::ops::ControlFlow::Continue(())
-            });
+            std::ops::ControlFlow::Continue(())
+        });
 
-            Some(data_device_manager.create_drag_and_drop_source(
-                &self.queue_handle,
-                mime_types,
-                dnd_actions,
-            ))
-        };
+        let data_source = data_device_manager.create_drag_and_drop_source(
+            &self.queue_handle,
+            mime_types,
+            dnd_actions,
+        );
 
         let mut pool = state.image_pool.lock().unwrap();
         let icon_surface = icon.and_then(|icon| {
@@ -845,17 +841,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
             Some(surface)
         });
 
-        match &data_source {
-            Some(source) => {
-                source.start_drag(data_device, source_surface, icon_surface.as_ref(), serial)
-            },
-            None => SctkDragSource::start_internal_drag(
-                data_device,
-                source_surface,
-                icon_surface.as_ref(),
-                serial,
-            ),
-        }
+        data_source.start_drag(data_device, source_surface, icon_surface.as_ref(), serial);
 
         let transfer_id = make_data_transfer_id(data_device.inner().id(), serial);
 

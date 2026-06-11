@@ -46,7 +46,6 @@
 #![warn(missing_docs)]
 
 use std::ffi::OsString;
-use std::marker::PhantomData;
 use std::ops::ControlFlow;
 use std::{fmt, io};
 
@@ -290,21 +289,9 @@ pub trait DataTransferSend: DataTransfer + Send {
     /// Get the data for the specified type, or `None` if this value does not supply the given data
     /// type.
     fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData>;
-
-    /// If `true`, this data transfer is only valid for the application sending the data.
-    ///
-    /// This is useful on Wayland and macOS, which allow expressing internal drag-and-drop in the
-    /// API. On platforms which make no distinction between internal and external drag-and-drop,
-    /// this is ignored.
-    fn is_internal_only(&self) -> bool;
 }
 
 impl_dyn_casting!(DataTransferSend);
-
-/// Marker for a [`DataTransferSendBuilder`] which is internal-only.
-pub enum InternalTransferMarker {}
-/// Marker for a [`DataTransferSendBuilder`] which is external.
-pub enum ExternalTransferMarker {}
 
 type SendDataCallback<T> = Box<dyn Fn(&T, &dyn TransferType) -> Option<SendData> + Send>;
 
@@ -320,13 +307,12 @@ type SendDataCallback<T> = Box<dyn Fn(&T, &dyn TransferType) -> Option<SendData>
 /// This type abstracts that in a way that allows data to be sent cross-platform. `T` is an optional
 /// state value, which allows the user to have a single source of truth for their data, converting
 /// it lazily to the requested type.
-pub struct DataTransferSendBuilder<T, M = ExternalTransferMarker> {
+pub struct DataTransferSendBuilder<T> {
     state: T,
     types: Vec<(Box<dyn TransferType + Send>, SendDataCallback<T>)>,
-    _is_internal: PhantomData<M>,
 }
 
-impl<T, M> fmt::Debug for DataTransferSendBuilder<T, M>
+impl<T> fmt::Debug for DataTransferSendBuilder<T>
 where
     T: fmt::Debug,
 {
@@ -335,9 +321,8 @@ where
     }
 }
 
-impl<T, M> DataTransfer for DataTransferSendBuilder<T, M>
+impl<T> DataTransfer for DataTransferSendBuilder<T>
 where
-    M: 'static,
     T: fmt::Debug + Send + 'static,
 {
     fn for_each_available_type<'this>(
@@ -348,49 +333,24 @@ where
     }
 }
 
-impl<T> DataTransferSend for DataTransferSendBuilder<T, ExternalTransferMarker>
+impl<T> DataTransferSend for DataTransferSendBuilder<T>
 where
     T: fmt::Debug + Send + 'static,
 {
     fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData> {
         self.data_for_type(type_)
     }
-
-    fn is_internal_only(&self) -> bool {
-        false
-    }
 }
 
-impl<T> DataTransferSend for DataTransferSendBuilder<T, InternalTransferMarker>
-where
-    T: fmt::Debug + Send + 'static,
-{
-    fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData> {
-        self.data_for_type(type_)
-    }
-
-    fn is_internal_only(&self) -> bool {
-        true
-    }
-}
-
-impl<T> DataTransferSendBuilder<T, ExternalTransferMarker> {
+impl<T> DataTransferSendBuilder<T> {
     /// Create a new [`DataTransferSendBuilder`], with a state value which acts as
     /// the single source of truth for the underlying data.
     pub fn new(state: T) -> Self {
-        Self { state, types: vec![], _is_internal: PhantomData }
+        Self { state, types: vec![] }
     }
 }
 
-impl<T> DataTransferSendBuilder<T, InternalTransferMarker> {
-    /// Create a new [`DataTransferSendBuilder`], with a state value which acts as
-    /// the single source of truth for the underlying data.
-    pub fn new_internal(state: T) -> Self {
-        Self { state, types: vec![], _is_internal: PhantomData }
-    }
-}
-
-impl<T, M> DataTransferSendBuilder<T, M> {
+impl<T> DataTransferSendBuilder<T> {
     fn data_for_type(&self, type_: &dyn TransferType) -> Option<SendData> {
         let (_, func) = self.types.iter().find(|(ty, _)| ty.matches(type_))?;
 
@@ -431,10 +391,9 @@ impl<T, M> DataTransferSendBuilder<T, M> {
     }
 }
 
-impl<T, M> DataTransferSendBuilder<T, M>
+impl<T> DataTransferSendBuilder<T>
 where
-    T: fmt::Debug + 'static,
-    Self: DataTransferSend,
+    T: fmt::Debug + Send + 'static,
 {
     /// Consume the builder, returning an implementation of [`DataTransferSend`].
     ///
