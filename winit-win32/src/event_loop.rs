@@ -13,16 +13,13 @@ use std::{fmt, mem, panic, ptr};
 
 use dpi::{PhysicalPosition, PhysicalSize};
 use windows_sys::Win32::Foundation::{
-    DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FALSE, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT,
-    RECT, WAIT_FAILED, WPARAM,
+    FALSE, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_FAILED, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromRect, MonitorFromWindow,
     RDW_INTERNALPAINT, RedrawWindow, SC_SCREENSAVE, ScreenToClient, ValidateRect,
 };
-use windows_sys::Win32::System::Ole::{
-    DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE, DoDragDrop, RevokeDragDrop,
-};
+use windows_sys::Win32::System::Ole::RevokeDragDrop;
 use windows_sys::Win32::System::Threading::{
     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, GetCurrentThreadId, INFINITE,
     SetWaitableTimer, TIMER_ALL_ACCESS,
@@ -76,7 +73,7 @@ use winit_core::event::{
 };
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DragIcon,
+    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndAction, DragIcon,
     EventLoopProxy as RootEventLoopProxy, EventLoopProxyProvider,
     OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
@@ -90,7 +87,7 @@ use super::window::set_skip_taskbar;
 use crate::dark_mode::try_theme;
 use crate::dnd::{DropSource, FileDropHandler, SourceDataObject, WinDataTransfer, WinTypedData};
 use crate::dpi::{become_dpi_aware, dpi_to_scale_factor};
-use crate::event_loop::runner::SourceDrag;
+use crate::event_loop::runner::PendingDrag;
 use crate::icon::WinCursor;
 use crate::ime::ImeContext;
 use crate::keyboard::KeyEventBuilder;
@@ -507,28 +504,23 @@ impl RootActiveEventLoop for ActiveEventLoop {
         Ok(Box::new(WinDataTransfer::new(data)))
     }
 
-    fn set_valid_actions(
-        &self,
-        id: DataTransferId,
-        actions: &[DndAction],
-    ) -> Result<(), RequestError> {
+    fn set_actions(&self, id: DataTransferId, actions: &[DndAction]) -> Result<(), RequestError> {
         let mut state = self.0.drag_state.borrow_mut();
         let Some(state) = state.as_mut().filter(|s| s.id == id) else {
             return Err(os_error!(UnknownDataTransfer(id)).into());
         };
-        state.actions = actions.hint();
+        state.actions = actions.to_vec();
         Ok(())
     }
 
     fn start_drag(
         &self,
-        _source: WindowId,
+        source: WindowId,
         send_data: Box<dyn DataTransferSend>,
-        action_mask: &[DndAction],
+        allowed_actions: &[DndAction],
         icon: Option<DragIcon>,
     ) -> Result<DataTransferId, RequestError> {
-        let allowed_actions = action_mask.hint();
-        let allowed_effects = crate::dnd::actions_to_dropeffect_mask(allowed_actions);
+        let allowed_effects = crate::dnd::dnd_actions_to_dropeffect_mask(allowed_actions);
         // Win32 would happily run a modal `DoDragDrop` with `allowed_effects == 0`, but every
         // target would see "no action allowed" and the drag would end in a guaranteed cancel
         // after burning a full modal pump. Fail fast instead - the caller asked for a drag
@@ -564,44 +556,15 @@ impl RootActiveEventLoop for ActiveEventLoop {
             }
         }
 
-        // Make the drag visible to our own target-side `IDropTarget` so it can recognize
-        // self-drops and reuse this id + action mask without going through the (buffered) app
-        // handler. The guard ensures the flag is cleared on any exit path - if anything between
-        // here and `DoDragDrop`'s return panics, the stale flag would otherwise permanently
-        // disable `WM_PAINT` dispatch and misclassify all future external drags as self-drops.
-        struct ClearOnDrop<'a>(&'a Cell<Option<SourceDrag>>);
-        impl Drop for ClearOnDrop<'_> {
-            fn drop(&mut self) {
-                self.0.set(None);
-            }
-        }
-        self.0.source_drag.set(Some(SourceDrag { id, allowed_actions }));
-        let _guard = ClearOnDrop(&self.0.source_drag);
+        self.0.pending_drag.replace(Some(PendingDrag {
+            window_id: source,
+            id,
+            data_object,
+            drop_source,
+            allowed_effects,
+        }));
 
-        let mut effect_out: u32 = DROPEFFECT_NONE;
-        let hr = unsafe {
-            DoDragDrop(
-                data_object.interface_ptr(),
-                drop_source.interface_ptr(),
-                allowed_effects,
-                &mut effect_out,
-            )
-        };
-
-        // Both `DRAGDROP_S_DROP` and `DRAGDROP_S_CANCEL` are success codes for us - the app
-        // will hear about the outcome via the buffered `DragDropped`/`DragLeft` events
-        // (target-side translates `effect_out == DROPEFFECT_NONE` to `DragLeft`).
-        // Log the negotiated effect so cross-process drops, which have no target-side event
-        // in this process, leave a debuggable trace of what action the remote target performed.
-        if hr == DRAGDROP_S_DROP || hr == DRAGDROP_S_CANCEL {
-            tracing::trace!(
-                "DoDragDrop completed: hr=0x{hr:08x} effect_out={effect_out} \
-                 (COPY={DROPEFFECT_COPY}, MOVE={DROPEFFECT_MOVE}, LINK={DROPEFFECT_LINK})",
-            );
-            Ok(id)
-        } else {
-            Err(os_error!(std::io::Error::other(format!("DoDragDrop failed: 0x{hr:08x}"))).into())
-        }
+        Ok(id)
     }
 }
 
@@ -2482,6 +2445,13 @@ unsafe fn public_window_callback_inner(
         .event_loop_runner
         .catch_unwind(callback)
         .unwrap_or_else(|| result = ProcResult::Value(-1));
+
+    // We execute a new drag operation here instead of immediately starting it in
+    // `ActiveEventLoop::start_drag`. `DoDragDrop` is blocking and synchronous, so if we started
+    // it inside the event loop then an internal drag operation would be re-entrant and the
+    // application would not be able to handle the incoming messages. This is after the application
+    // has had a chance to handle mouse events.
+    userdata.event_loop_runner.try_execute_drag_drop();
 
     match result {
         ProcResult::DefWindowProc(wparam) => unsafe { DefWindowProcW(window, msg, wparam, lparam) },

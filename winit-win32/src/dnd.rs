@@ -2,7 +2,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{OsString, c_void};
 use std::io;
-use std::ops::ControlFlow;
+use std::num::NonZeroU32;
+use std::ops::{BitOr, ControlFlow};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -36,7 +37,7 @@ use winit_core::data_transfer::{
     DataTransfer, DataTransferId, DataTransferSend, SendData, TransferType, TypeHint, TypedData,
 };
 use winit_core::event::WindowEvent;
-use winit_core::event_loop::DndActions;
+use winit_core::event_loop::DndAction;
 
 use crate::definitions::{
     IDataObject, IDataObjectVtbl, IDropSource, IDropSourceVtbl, IDropTarget, IDropTargetHelper,
@@ -387,7 +388,7 @@ impl FileDropHandler {
     unsafe extern "system" fn DragEnter(
         this: *mut IDropTarget,
         pDataObj: *const IDataObject,
-        _grfKeyState: u32,
+        grfKeyState: u32,
         pt: POINTL,
         pdwEffect: *mut u32,
     ) -> HRESULT {
@@ -396,14 +397,15 @@ impl FileDropHandler {
         // and seed actions from the mask declared at `start_drag` - the app's `DragEntered`
         // handler can't call `set_valid_actions` in time because it's buffered until `DoDragDrop`
         // returns.
-        let (data_transfer_id, initial_actions) = match drop_handler.runner.source_drag.get() {
-            Some(info) => (info.id, info.allowed_actions),
-            None => (next_data_transfer_id(), DndActions::none()),
-        };
+        let data_transfer_id = drop_handler
+            .runner
+            .source_drag
+            .get()
+            .map_or_else(next_data_transfer_id, |info| info.id);
         drop_handler.active_data_transfer_id = Some(data_transfer_id);
 
         let data = Rc::new(unsafe { DataObject::from_idataobject(pDataObj) });
-        drop_handler.runner.register_data_transfer(data_transfer_id, data, initial_actions);
+        drop_handler.runner.register_data_transfer(data_transfer_id, data);
 
         let pt_screen = POINT { x: pt.x, y: pt.y };
         let mut pt_client = pt_screen;
@@ -415,8 +417,17 @@ impl FileDropHandler {
             id: data_transfer_id,
             position: Some(position),
         });
-        unsafe {
-            *pdwEffect = DROPEFFECT_NONE;
+
+        // Get actions after the event handler has run, so that we update it based on the user's
+        // supplied info.
+        {
+            let actions = drop_handler.runner.current_drag_actions(data_transfer_id);
+            let source_allowed = unsafe { pdwEffect.read() };
+
+            let new_effect = pick_effect(&actions, grfKeyState, source_allowed);
+            unsafe {
+                pdwEffect.write(new_effect);
+            }
         }
 
         // Forward to the shell drop-target helper so any drag image attached by the source's
@@ -446,14 +457,13 @@ impl FileDropHandler {
         let drop_handler = unsafe { Self::from_interface(this) };
         let Some(data_transfer_id) = drop_handler.active_data_transfer_id else {
             unsafe {
-                *pdwEffect = DROPEFFECT_NONE;
+                pdwEffect.write(DROPEFFECT_NONE);
             }
 
             return E_ABORT;
         };
 
-        let actions = drop_handler.runner.current_drag_actions(data_transfer_id);
-        let source_allowed = unsafe { *pdwEffect };
+        let source_allowed = unsafe { pdwEffect.read() };
 
         let pt_screen = POINT { x: pt.x, y: pt.y };
         let mut pt_client = pt_screen;
@@ -462,9 +472,13 @@ impl FileDropHandler {
         }
         let position = PhysicalPosition::new(pt_client.x as f64, pt_client.y as f64);
         (drop_handler.send_event)(WindowEvent::DragPosition { id: data_transfer_id, position });
-        let new_effect = pick_effect(actions, grfKeyState, source_allowed);
+
+        // Get actions after the event handler has run, so that we update it based on the user's
+        // supplied info.
+        let actions = drop_handler.runner.current_drag_actions(data_transfer_id);
+        let new_effect = pick_effect(&actions, grfKeyState, source_allowed);
         unsafe {
-            *pdwEffect = new_effect;
+            pdwEffect.write(new_effect);
         }
 
         if let Some(helper) = drop_handler.drop_target_helper {
@@ -508,8 +522,20 @@ impl FileDropHandler {
             return E_ABORT;
         };
 
-        let actions = drop_handler.runner.current_drag_actions(data_transfer_id);
-        let source_allowed = unsafe { *pdwEffect };
+        let effects = unsafe { pdwEffect.read() };
+        let proposed_action =
+            drop_handler.runner.current_drag_actions(data_transfer_id).iter().copied().find(
+                |action| {
+                    let effect = match action {
+                        DndAction::Move => DROPEFFECT_MOVE,
+                        DndAction::Copy => DROPEFFECT_COPY,
+                        DndAction::Link => DROPEFFECT_LINK,
+                        _ => return false,
+                    };
+
+                    (effects | effect) != 0
+                },
+            );
 
         let pt_screen = POINT { x: pt.x, y: pt.y };
         let mut pt_client = pt_screen;
@@ -517,19 +543,25 @@ impl FileDropHandler {
             ScreenToClient(drop_handler.window, &mut pt_client);
         }
         let pt = pt_client;
+        let position = PhysicalPosition::new(pt.x as f64, pt.y as f64);
+
+        (drop_handler.send_event)(WindowEvent::DragPosition { id: data_transfer_id, position });
+
+        // Get actions after the event handler has run, so that we update it based on the user's
+        // supplied info.
+        let actions = drop_handler.runner.current_drag_actions(data_transfer_id);
+        let source_allowed = unsafe { *pdwEffect };
 
         // Negotiate the effect first so we can pick the right outgoing event. If the app
         // rejected the drop (e.g. via `set_valid_actions(none())`), `pick_effect` returns
         // `DROPEFFECT_NONE`; in that case OLE reports back `effect_out == DROPEFFECT_NONE` to
         // the source, so the matching observer-facing event is `DragLeft`, not `DragDropped` -
         // otherwise target and source see contradictory outcomes.
-        let effect = pick_effect(actions, grfKeyState, source_allowed);
-        let position = PhysicalPosition::new(pt.x as f64, pt.y as f64);
-        (drop_handler.send_event)(WindowEvent::DragPosition { id: data_transfer_id, position });
+        let effect = pick_effect(&actions, grfKeyState, source_allowed);
         let event = if effect == DROPEFFECT_NONE {
             WindowEvent::DragLeft { id: data_transfer_id }
         } else {
-            WindowEvent::DragDropped { id: data_transfer_id }
+            WindowEvent::DragDropped { id: data_transfer_id, proposed_action }
         };
         (drop_handler.send_event)(event);
         unsafe {
@@ -580,50 +612,72 @@ static DROP_TARGET_VTBL: IDropTargetVtbl = IDropTargetVtbl {
     Drop: FileDropHandler::Drop,
 };
 
+pub(crate) type DropEffect = u32;
+
 /// Map the app's [`DndActions`] to the win32 `DROPEFFECT_*` bitmask.
-pub(crate) fn actions_to_dropeffect_mask(actions: DndActions) -> u32 {
-    let mut mask = 0u32;
-    if actions.copy() {
-        mask |= DROPEFFECT_COPY;
+pub(crate) fn dnd_action_to_dropeffect_mask(action: DndAction) -> DropEffect {
+    match action {
+        DndAction::Move => DROPEFFECT_MOVE,
+        DndAction::Copy => DROPEFFECT_COPY,
+        DndAction::Link => DROPEFFECT_LINK,
+        _ => DROPEFFECT_NONE,
     }
-    if actions.move_() {
-        mask |= DROPEFFECT_MOVE;
+}
+
+/// Map the app's [`DndActions`] to the win32 `DROPEFFECT_*` bitmask.
+pub(crate) fn dnd_actions_to_dropeffect_mask(actions: &[DndAction]) -> DropEffect {
+    actions
+        .iter()
+        .copied()
+        .map(dnd_action_to_dropeffect_mask)
+        .fold(DropEffect::default(), BitOr::bitor)
+}
+
+pub(crate) fn drop_effect_to_dnd_action(effect: DropEffect) -> Option<DndAction> {
+    match effect {
+        DROPEFFECT_MOVE => Some(DndAction::Move),
+        DROPEFFECT_COPY => Some(DndAction::Copy),
+        DROPEFFECT_LINK => Some(DndAction::Link),
+        _ => None,
     }
-    if actions.link() {
-        mask |= DROPEFFECT_LINK;
-    }
-    mask
 }
 
 // Intersect the app's valid actions with the source's allowed effects, honoring Ctrl/Shift.
-fn pick_effect(actions: DndActions, key_state: u32, source_allowed: u32) -> u32 {
+fn pick_effect(actions: &[DndAction], key_state: u32, source_allowed: u32) -> u32 {
     const MK_SHIFT: u32 = 0x0004;
     const MK_CONTROL: u32 = 0x0008;
 
-    let allowed = actions_to_dropeffect_mask(actions) & source_allowed;
+    // TODO: On macOS, option will disable copy (so if copy has higher precedence than move you can
+    // select move via option). Is alt expected to act similarly on Windows?
+    let mut allowed = dnd_actions_to_dropeffect_mask(actions) & source_allowed;
     if allowed == 0 {
         return DROPEFFECT_NONE;
     }
 
-    let ctrl = key_state & MK_CONTROL != 0;
-    let shift = key_state & MK_SHIFT != 0;
-    if ctrl && shift && (allowed & DROPEFFECT_LINK) != 0 {
-        return DROPEFFECT_LINK;
-    }
-    if ctrl && !shift && (allowed & DROPEFFECT_COPY) != 0 {
-        return DROPEFFECT_COPY;
-    }
-    if !ctrl && shift && (allowed & DROPEFFECT_MOVE) != 0 {
-        return DROPEFFECT_MOVE;
+    // If holding a modifier would result in no valid values, ignore
+    // Need to use filter instead of if-let chains for 1.85 compatibility.
+    if let Some(new_allowed) =
+        NonZeroU32::new(allowed & !DROPEFFECT_MOVE).filter(|_| key_state & MK_CONTROL != 0)
+    {
+        allowed = new_allowed.get();
     }
 
-    if (allowed & DROPEFFECT_COPY) != 0 {
-        DROPEFFECT_COPY
-    } else if (allowed & DROPEFFECT_MOVE) != 0 {
-        DROPEFFECT_MOVE
-    } else {
-        DROPEFFECT_LINK
+    // If holding a modifier would result in no valid values, ignore
+    // Need to use filter instead of if-let chains for 1.85 compatibility.
+    if let Some(new_allowed) =
+        NonZeroU32::new(allowed & !DROPEFFECT_COPY).filter(|_| key_state & MK_SHIFT != 0)
+    {
+        allowed = new_allowed.get();
     }
+
+    for action in actions {
+        let effect = dnd_action_to_dropeffect_mask(*action);
+        if (allowed & effect) != 0 {
+            return effect;
+        }
+    }
+
+    DROPEFFECT_NONE
 }
 
 // ============================================================================

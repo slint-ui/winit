@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -7,15 +7,18 @@ use std::time::Instant;
 use std::{fmt, mem, panic};
 
 use dpi::PhysicalSize;
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, HWND};
+use windows_sys::Win32::System::Ole::{
+    DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE, DoDragDrop,
+};
 use winit_core::application::ApplicationHandler;
 use winit_core::data_transfer::DataTransferId;
 use winit_core::event::{DeviceEvent, DeviceId, StartCause, SurfaceSizeWriter, WindowEvent};
-use winit_core::event_loop::{ActiveEventLoop as RootActiveEventLoop, DndActions};
+use winit_core::event_loop::{ActiveEventLoop as RootActiveEventLoop, DndAction};
 use winit_core::window::WindowId;
 
 use super::{ActiveEventLoop, ControlFlow, EventLoopThreadExecutor};
-use crate::dnd::DataObject;
+use crate::dnd::{DataObject, DropEffect, DropSource, SourceDataObject, drop_effect_to_dnd_action};
 use crate::event_loop::{GWL_USERDATA, WindowData};
 use crate::util::get_window_long;
 
@@ -23,10 +26,19 @@ type EventHandler = Cell<Option<&'static mut (dyn ApplicationHandler + 'static)>
 
 /// State for the single drag-and-drop transfer currently in flight (OLE guarantees at most one
 /// active drag per process).
+#[derive(Debug)]
 pub(super) struct DragState {
     pub(super) id: DataTransferId,
     data: Rc<DataObject>,
-    pub(super) actions: DndActions,
+    pub(super) actions: Vec<DndAction>,
+}
+
+pub(super) struct PendingDrag {
+    pub(super) window_id: WindowId,
+    pub(super) data_object: SourceDataObject,
+    pub(super) drop_source: DropSource,
+    pub(super) allowed_effects: DropEffect,
+    pub(super) id: DataTransferId,
 }
 
 /// Set while `DoDragDrop` is on the call stack - i.e., this process is the source of an active
@@ -35,7 +47,6 @@ pub(super) struct DragState {
 #[derive(Copy, Clone)]
 pub(crate) struct SourceDrag {
     pub(crate) id: DataTransferId,
-    pub(crate) allowed_actions: DndActions,
 }
 
 pub(crate) struct EventLoopRunner {
@@ -62,6 +73,14 @@ pub(crate) struct EventLoopRunner {
 
     /// `Some(_)` while `start_drag` has `DoDragDrop` on the call stack.
     pub(crate) source_drag: Cell<Option<SourceDrag>>,
+
+    /// `DoDragDrop` is blocking and synchronous, so we wait until after the application returns
+    /// control to winit before actually calling into the OS to initiate the drag. This prevents
+    /// the event loop from being re-entrant if we are doing an internal drag operation, since if
+    /// we handled this inside `ActiveEventLoop::start_drag` then all the `WindowEvent::Drag*`
+    /// events would be buffered until `DoDragDrop` returns, preventing the application from
+    /// handling those messages.
+    pub(super) pending_drag: RefCell<Option<PendingDrag>>,
 
     /// For self-drops, target-side `IDropTarget::Drop` can't release the cached `DragState`
     /// before its `DragDropped` `WindowEvent` is delivered - the event is buffered (the outer app
@@ -123,7 +142,61 @@ impl EventLoopRunner {
             event_buffer: RefCell::new(VecDeque::new()),
             drag_state: RefCell::new(None),
             source_drag: Cell::new(None),
+            pending_drag: RefCell::new(None),
             pending_source_drag_cleanup: Cell::new(None),
+        }
+    }
+
+    pub(super) fn try_execute_drag_drop(self: &Rc<Self>) {
+        let Some(PendingDrag { data_object, drop_source, id, allowed_effects, window_id }) =
+            self.pending_drag.take()
+        else {
+            return;
+        };
+
+        // Make the drag visible to our own target-side `IDropTarget` so it can recognize
+        // self-drops and reuse this id + action mask without going through the (buffered) app
+        // handler. The guard ensures the flag is cleared on any exit path - if anything between
+        // here and `DoDragDrop`'s return panics, the stale flag would otherwise permanently
+        // disable `WM_PAINT` dispatch and misclassify all future external drags as self-drops.
+        struct ClearOnDrop<'a>(&'a Cell<Option<SourceDrag>>);
+        impl Drop for ClearOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.set(None);
+            }
+        }
+        self.source_drag.set(Some(SourceDrag { id }));
+        let _guard = ClearOnDrop(&self.source_drag);
+
+        let mut effect_out: u32 = DROPEFFECT_NONE;
+        let hr = unsafe {
+            DoDragDrop(
+                data_object.interface_ptr(),
+                drop_source.interface_ptr(),
+                allowed_effects,
+                &mut effect_out,
+            )
+        };
+
+        let action = drop_effect_to_dnd_action(effect_out);
+
+        self.send_event(Event::Window {
+            window_id,
+            event: WindowEvent::OutgoingDragEnded { id, action },
+        });
+
+        // Both `DRAGDROP_S_DROP` and `DRAGDROP_S_CANCEL` are success codes for us - the app
+        // will hear about the outcome via the buffered `DragDropped`/`DragLeft` events
+        // (target-side translates `effect_out == DROPEFFECT_NONE` to `DragLeft`).
+        // Log the negotiated effect so cross-process drops, which have no target-side event
+        // in this process, leave a debuggable trace of what action the remote target performed.
+        if hr == DRAGDROP_S_DROP || hr == DRAGDROP_S_CANCEL {
+            tracing::trace!(
+                "DoDragDrop completed: hr=0x{hr:08x} effect_out={effect_out} \
+                 (COPY={DROPEFFECT_COPY}, MOVE={DROPEFFECT_MOVE}, LINK={DROPEFFECT_LINK})",
+            );
+        } else {
+            tracing::error!("DoDragDrop failed: 0x{hr:08x}",);
         }
     }
 
@@ -131,13 +204,9 @@ impl EventLoopRunner {
         self.pending_source_drag_cleanup.set(Some(id));
     }
 
-    pub(crate) fn register_data_transfer(
-        &self,
-        id: DataTransferId,
-        data: Rc<DataObject>,
-        actions: DndActions,
-    ) {
-        *self.drag_state.borrow_mut() = Some(DragState { id, data, actions });
+    pub(crate) fn register_data_transfer(&self, id: DataTransferId, data: Rc<DataObject>) {
+        // By default, no actions have been set as valid by the target.
+        *self.drag_state.borrow_mut() = Some(DragState { id, data, actions: Default::default() });
     }
 
     pub(crate) fn remove_data_transfer(&self, id: DataTransferId) {
@@ -152,13 +221,10 @@ impl EventLoopRunner {
         state.as_ref().filter(|s| s.id == id).map(|s| s.data.clone())
     }
 
-    pub(crate) fn current_drag_actions(&self, id: DataTransferId) -> DndActions {
-        self.drag_state
-            .borrow()
-            .as_ref()
-            .filter(|s| s.id == id)
-            .map(|s| s.actions)
-            .unwrap_or(DndActions::none())
+    pub(crate) fn current_drag_actions(&self, id: DataTransferId) -> Ref<'_, [DndAction]> {
+        Ref::map(self.drag_state.borrow(), |state| {
+            state.as_ref().filter(|s| s.id == id).map(|s| &s.actions[..]).unwrap_or_default()
+        })
     }
 
     /// Associate the application's event handler with the runner.
@@ -211,6 +277,7 @@ impl EventLoopRunner {
             event_buffer: _,
             drag_state,
             source_drag,
+            pending_drag,
             pending_source_drag_cleanup,
         } = self;
         interrupt_msg_dispatch.set(false);
@@ -218,8 +285,9 @@ impl EventLoopRunner {
         panic_error.set(None);
         exit.set(None);
         event_handler.set(None);
-        *drag_state.borrow_mut() = None;
+        drag_state.take();
         source_drag.set(None);
+        pending_drag.take();
         pending_source_drag_cleanup.set(None);
     }
 }
