@@ -16,7 +16,6 @@ use dpi::LogicalSize;
 use rustix::event::{PollFd, PollFlags};
 use rustix::pipe::{self, PipeFlags};
 use sctk::data_device_manager::data_offer;
-use sctk::data_device_manager::data_source::DragSource as SctkDragSource;
 use sctk::reexports::calloop_wayland_source::WaylandSource;
 use sctk::reexports::client::{Connection, QueueHandle, globals};
 use sctk::shell::WaylandSurface;
