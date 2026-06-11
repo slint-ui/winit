@@ -121,7 +121,7 @@ impl AppState {
         self.windows.borrow_mut().get(&id)?.get_on_main(move |delegate| delegate.load().map(func))
     }
 
-    pub fn new_window(&self, window: &Retained<WindowDelegate>, mtm: MainThreadMarker) {
+    pub fn register_window(&self, window: &Retained<WindowDelegate>, mtm: MainThreadMarker) {
         let id = window.id();
         let window_downgraded = Weak::from_retained(window);
         self.windows.borrow_mut().insert(id, MainThreadBound::new(window_downgraded, mtm));
