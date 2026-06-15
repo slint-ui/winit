@@ -5,11 +5,12 @@ use std::sync::Arc;
 
 use dpi::PhysicalPosition;
 use image::RgbImage;
+use softbuffer::{Context, Surface};
 use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::data_transfer::{DataTransferId, DataTransferSendBuilder, TypeHint, TypedData};
 use winit::event::{MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, DndAction, DragIcon, EventLoop};
+use winit::event_loop::{ActiveEventLoop, DndAction, DragIcon, EventLoop, OwnedDisplayHandle};
 use winit::icon::{Icon, RgbaIcon};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -23,14 +24,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let event_loop = EventLoop::new()?;
 
-    let app = Application::new();
+    let app = Application::default();
     Ok(event_loop.run_app(app)?)
 }
 
 /// Application state and event handling.
-#[derive(Debug)]
+#[derive(Default, Debug)]
 struct Application {
-    window: Option<Box<dyn Window>>,
+    surface: Option<Surface<OwnedDisplayHandle, Box<dyn Window>>>,
     last_dnd_fetch: Option<Box<dyn TypedData>>,
     last_drag_start: Option<DataTransferId>,
     drag_icon: (Icon, PhysicalPosition<i32>),
@@ -70,7 +71,11 @@ impl ApplicationHandler for Application {
     fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
         let window_attributes =
             WindowAttributes::default().with_title("Drag and drop files, text or HTML onto me!");
-        self.window = Some(event_loop.create_window(window_attributes).unwrap());
+
+        let window = event_loop.create_window(window_attributes).unwrap();
+        let context = Context::new(event_loop.owned_display_handle()).unwrap();
+        let surface = Surface::new(&context, window).unwrap();
+        self.surface = Some(surface);
     }
 
     fn window_event(
@@ -247,9 +252,9 @@ impl ApplicationHandler for Application {
                 info!("{event:?}");
             },
             WindowEvent::RedrawRequested => {
-                let window = self.window.as_ref().unwrap();
-                window.pre_present_notify();
-                fill::fill_window(window.as_ref());
+                let surface = self.surface.as_mut().unwrap();
+                surface.window().pre_present_notify();
+                fill::fill(surface);
             },
             WindowEvent::CloseRequested => {
                 event_loop.exit();
