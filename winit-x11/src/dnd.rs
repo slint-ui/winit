@@ -5,8 +5,7 @@ use std::marker::PhantomData;
 use std::os::raw::*;
 use std::str::Utf8Error;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
-use std::thread::ThreadId;
+use std::sync::{Arc, OnceLock};
 
 use percent_encoding::percent_decode;
 use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypeHint, TypedData};
@@ -14,6 +13,7 @@ use x11rb::protocol::xproto::{self, ConnectionExt};
 
 use crate::atoms::AtomName::None as DndNone;
 use crate::atoms::*;
+use crate::deadlock_sentinel::{DeadlockSentinel, DeadlockSentinelReader};
 use crate::event_loop::{CookieResultExt, X11Error};
 use crate::util;
 use crate::xdisplay::XConnection;
@@ -43,43 +43,6 @@ impl From<Utf8Error> for UriListParseError {
 impl From<io::Error> for UriListParseError {
     fn from(e: io::Error) -> Self {
         UriListParseError::UnresolvablePath(e)
-    }
-}
-
-// When `thread_id_value` is stabilized, this can become `AtomicU64`.
-#[derive(Default, Debug)]
-pub struct DeadlockSentinel(Arc<RwLock<Option<ThreadId>>>);
-
-/// Read-side of `DeadlockSentinel` (to prevent accidentally guarding in a re-entrant way).
-#[derive(Debug, Clone)]
-pub struct DeadlockSentinelReader(Arc<RwLock<Option<ThreadId>>>);
-
-impl DeadlockSentinelReader {
-    fn get(&self) -> Option<ThreadId> {
-        *self.0.read().unwrap()
-    }
-}
-
-#[must_use]
-#[derive(Debug)]
-pub struct DeadlockSentinelGuard(Arc<RwLock<Option<ThreadId>>>);
-
-impl Drop for DeadlockSentinelGuard {
-    fn drop(&mut self) {
-        *self.0.write().unwrap() = None;
-    }
-}
-
-impl DeadlockSentinel {
-    pub fn guard(&self) -> DeadlockSentinelGuard {
-        let mut writer = self.0.write().unwrap();
-        assert!(writer.is_none(), "Internal error: re-entrant `DeadlockSentinelGuard`");
-        *writer = Some(std::thread::current().id());
-        DeadlockSentinelGuard(self.0.clone())
-    }
-
-    pub fn reader(&self) -> DeadlockSentinelReader {
-        DeadlockSentinelReader(self.0.clone())
     }
 }
 

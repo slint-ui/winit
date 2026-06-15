@@ -38,7 +38,8 @@ use x11rb::x11_utils::X11Error as LogicalError;
 use x11rb::xcb_ffi::ReplyOrIdError;
 
 use crate::atoms::*;
-use crate::dnd::{DeadlockSentinelGuard, Dnd, SelectionFetchState};
+use crate::deadlock_sentinel::DeadlockSentinelGuard;
+use crate::dnd::{Dnd, SelectionFetchState};
 use crate::event_processor::{EventProcessor, MAX_MOD_REPLAY_LEN};
 use crate::ime::{self, Ime, ImeCreationError, ImeSender};
 use crate::util::{self, CustomCursor};
