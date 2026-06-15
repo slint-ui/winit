@@ -64,7 +64,7 @@ pub struct WinitSeatState {
 
     /// The hold pointer gesture bound on the seat.
     pointer_gesture_hold: Option<ZwpPointerGestureHoldV1>,
-  
+
     /// The drag-and-drop state
     data_device: Option<DataDevice>,
 
@@ -237,7 +237,7 @@ impl SeatHandler for WinitState {
                 if let Some(pointer_gesture_pinch) = seat_state.pointer_gesture_pinch.take() {
                     pointer_gesture_pinch.destroy();
                 }
-              
+
                 if let Some(pointer_gesture_hold) = seat_state.pointer_gesture_hold.take() {
                     pointer_gesture_hold.destroy();
                 }
