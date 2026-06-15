@@ -9,7 +9,7 @@ use softbuffer::{Context, Surface};
 use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::data_transfer::{DataTransferId, DataTransferSendBuilder, TypeHint, TypedData};
-use winit::event::{MouseButton, WindowEvent};
+use winit::event::{ButtonSource, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, DndAction, DragIcon, EventLoop, OwnedDisplayHandle};
 use winit::icon::{Icon, RgbaIcon};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -85,64 +85,56 @@ impl ApplicationHandler for Application {
         event: WindowEvent,
     ) {
         match event {
-            WindowEvent::PointerButton { button, state, .. } => {
-                let Some(button) = button.mouse_button() else {
-                    return;
-                };
+            WindowEvent::PointerButton { button: ButtonSource::Mouse(button), state, .. }
+                if button == MouseButton::Left && state.is_pressed() =>
+            {
+                let (icon, offset) = self.drag_icon.clone();
 
-                if button == MouseButton::Left && state.is_pressed() {
-                    let (icon, offset) = self.drag_icon.clone();
+                // In a real application, you probably wouldn't advertise so many types.
+                // Depending on platform and destination application, different options may be
+                // chosen.
+                let result = event_loop.start_drag(
+                    window_id,
+                    DataTransferSendBuilder::new(self.drag_image_data.clone())
+                        .with_type(TypeHint::UriList, |_, _| {
+                            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                            let root = manifest_dir.parent().unwrap();
+                            let this_file = root.join(file!());
+                            let icon_file = this_file.parent().unwrap().join("data/icon.png");
+                            let icon_file = icon_file.display();
+                            Some(vec![OsString::from(format!("file://{icon_file}"))])
+                        })
+                        .with_type(TypeHint::Plaintext, |_, _| Some("Winit example".to_string()))
+                        .with_type(TypeHint::Html, |_, _| {
+                            Some("<span><strong>Winit</strong> example</span>".to_string())
+                        })
+                        // You can advertise a `TypeHint` that can match many types, and switch
+                        // inside the callback. For example, this will match any image type.
+                        // This may be desirable on some platforms which restrict the set of
+                        // image types that can be sent.
+                        .with_type(TypeHint::Image { extension_hint: None }, |image, ty| {
+                            let hint = ty.hint()?;
+                            match hint {
+                                TypeHint::Image { extension_hint } => {
+                                    let ext = extension_hint.unwrap_or("png");
+                                    info!("Destination requested image as {ext}, converting...");
+                                    let format = image::ImageFormat::from_extension(ext)?;
+                                    let mut out_buf = Vec::new();
+                                    let mut out_writer = std::io::Cursor::new(&mut out_buf);
 
-                    // In a real application, you probably wouldn't advertise so many types.
-                    // Depending on platform and destination application, different options may be
-                    // chosen.
-                    let result = event_loop.start_drag(
-                        window_id,
-                        DataTransferSendBuilder::new(self.drag_image_data.clone())
-                            .with_type(TypeHint::UriList, |_, _| {
-                                let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-                                let root = manifest_dir.parent().unwrap();
-                                let this_file = root.join(file!());
-                                let icon_file = this_file.parent().unwrap().join("data/icon.png");
-                                let icon_file = icon_file.display();
-                                Some(vec![OsString::from(format!("file://{icon_file}"))])
-                            })
-                            .with_type(TypeHint::Plaintext, |_, _| {
-                                Some("Winit example".to_string())
-                            })
-                            .with_type(TypeHint::Html, |_, _| {
-                                Some("<span><strong>Winit</strong> example</span>".to_string())
-                            })
-                            // You can advertise a `TypeHint` that can match many types, and switch
-                            // inside the callback. For example, this will match any image type.
-                            // This may be desirable on some platforms which restrict the set of
-                            // image types that can be sent.
-                            .with_type(TypeHint::Image { extension_hint: None }, |image, ty| {
-                                let hint = ty.hint()?;
-                                match hint {
-                                    TypeHint::Image { extension_hint } => {
-                                        let ext = extension_hint.unwrap_or("png");
-                                        info!(
-                                            "Destination requested image as {ext}, converting..."
-                                        );
-                                        let format = image::ImageFormat::from_extension(ext)?;
-                                        let mut out_buf = Vec::new();
-                                        let mut out_writer = std::io::Cursor::new(&mut out_buf);
+                                    image.write_to(&mut out_writer, format).ok()?;
 
-                                        image.write_to(&mut out_writer, format).ok()?;
+                                    Some(out_buf)
+                                },
+                                _ => None,
+                            }
+                        })
+                        .build(),
+                    &[DndAction::Move, DndAction::Copy],
+                    Some(DragIcon { icon, offset }),
+                );
 
-                                        Some(out_buf)
-                                    },
-                                    _ => None,
-                                }
-                            })
-                            .build(),
-                        &[DndAction::Move, DndAction::Copy],
-                        Some(DragIcon { icon, offset }),
-                    );
-
-                    self.last_drag_start = result.ok();
-                }
+                self.last_drag_start = result.ok();
             },
             WindowEvent::DragLeft { .. } => {
                 info!("{event:?}");
@@ -154,51 +146,51 @@ impl ApplicationHandler for Application {
             WindowEvent::DragDropped { .. } => {
                 info!("{event:?}");
 
-                if let Some(data) = &mut self.last_dnd_fetch {
-                    match data.type_().hint() {
-                        Some(TypeHint::Plaintext | TypeHint::Html) => {
-                            let text = data.try_as_string().unwrap();
-                            info!("{text:?}");
-                        },
-                        Some(TypeHint::UriList) => {
-                            let uris = data.try_as_uris().unwrap();
-                            info!("{uris:#?}");
-                        },
-                        Some(TypeHint::Image { extension_hint: ext }) => {
-                            let mut bytes = Vec::new();
-                            'read_image: {
-                                if data.try_read().unwrap().read_to_end(&mut bytes).is_err() {
-                                    warn!("Could not read!");
-                                    break 'read_image;
-                                }
+                let Some(mut data) = self.last_dnd_fetch.take() else {
+                    return;
+                };
 
-                                let format = ext.and_then(image::ImageFormat::from_extension);
-
-                                let reader = std::io::Cursor::new(&bytes[..]);
-                                let reader = match format {
-                                    Some(fmt) => image::ImageReader::with_format(reader, fmt),
-                                    None => image::ImageReader::new(reader),
-                                };
-
-                                match reader.decode() {
-                                    Ok(image) => {
-                                        let width = image.width();
-                                        let height = image.height();
-                                        info!("Received image ({width}x{height})");
-                                    },
-                                    Err(err) => {
-                                        warn!("Failed to decode image: {err}");
-                                    },
-                                }
+                match data.type_().hint() {
+                    Some(TypeHint::Plaintext | TypeHint::Html) => {
+                        let text = data.try_as_string().unwrap();
+                        info!("{text:?}");
+                    },
+                    Some(TypeHint::UriList) => {
+                        let uris = data.try_as_uris().unwrap();
+                        info!("{uris:#?}");
+                    },
+                    Some(TypeHint::Image { extension_hint: ext }) => {
+                        let mut bytes = Vec::new();
+                        'read_image: {
+                            if data.try_read().unwrap().read_to_end(&mut bytes).is_err() {
+                                warn!("Could not read!");
+                                break 'read_image;
                             }
-                        },
-                        _ => {
-                            unreachable!("Received a type we didn't ask for!");
-                        },
-                    }
-                }
 
-                self.last_dnd_fetch = None;
+                            let format = ext.and_then(image::ImageFormat::from_extension);
+
+                            let reader = std::io::Cursor::new(&bytes[..]);
+                            let reader = match format {
+                                Some(fmt) => image::ImageReader::with_format(reader, fmt),
+                                None => image::ImageReader::new(reader),
+                            };
+
+                            match reader.decode() {
+                                Ok(image) => {
+                                    let width = image.width();
+                                    let height = image.height();
+                                    info!("Received image ({width}x{height})");
+                                },
+                                Err(err) => {
+                                    warn!("Failed to decode image: {err}");
+                                },
+                            }
+                        }
+                    },
+                    _ => {
+                        unreachable!("Received a type we didn't ask for!");
+                    },
+                }
             },
             WindowEvent::DragEntered { id, .. } => {
                 info!("{event:?}");
