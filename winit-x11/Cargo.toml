@@ -15,7 +15,6 @@ serde = ["dep:serde", "bitflags/serde", "smol_str/serde", "dpi/serde"]
 bitflags.workspace = true
 cursor-icon.workspace = true
 dpi.workspace = true
-rustversion.workspace = true
 rwh_06.workspace = true
 serde = { workspace = true, optional = true }
 smol_str.workspace = true

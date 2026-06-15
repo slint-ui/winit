@@ -76,26 +76,14 @@ impl SharedDataReader {
         self.reader.try_data()
     }
 
-    #[rustversion::since(1.86)]
-    fn wait_internal(&self) -> io::Result<()> {
-        let _ = self.reader.data.wait();
-
-        Ok(())
-    }
-
-    #[rustversion::before(1.86)]
-    fn wait_internal(&self) -> io::Result<()> {
-        if self.reader.has_data() { Ok(()) } else { Err(io::ErrorKind::WouldBlock.into()) }
-    }
-
     fn wait_for_data(&self) -> io::Result<()> {
-        if !self.reader.has_data()
-            && self.deadlock_sentinel.get() == Some(std::thread::current().id())
-        {
-            return Err(io::ErrorKind::Deadlock.into());
+        if self.reader.has_data() {
+            return Ok(());
+        } else if self.deadlock_sentinel.get() == Some(std::thread::current().id()) {
+            Err(io::ErrorKind::Deadlock.into())
+        } else {
+            Err(io::ErrorKind::WouldBlock.into())
         }
-
-        self.wait_internal()
     }
 }
 
