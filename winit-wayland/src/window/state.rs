@@ -80,10 +80,6 @@ pub struct WindowState {
     /// Queue handle.
     pub queue_handle: QueueHandle<WinitState>,
 
-    pub last_seat: Option<ObjectId>,
-
-    pub last_event_serial: Option<u32>,
-
     /// Theme variant.
     theme: Option<Theme>,
 
@@ -229,8 +225,6 @@ impl WindowState {
             min_surface_size: MIN_WINDOW_SIZE,
             resize_increments: None,
             pointer_constraints,
-            last_seat: None,
-            last_event_serial: None,
             pointers: Default::default(),
             queue_handle: queue_handle.clone(),
             resizable: true,

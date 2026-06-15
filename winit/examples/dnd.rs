@@ -24,12 +24,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let event_loop = EventLoop::new()?;
 
-    let app = Application::default();
+    let app = Application::new();
     Ok(event_loop.run_app(app)?)
 }
 
 /// Application state and event handling.
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct Application {
     surface: Option<Surface<OwnedDisplayHandle, Box<dyn Window>>>,
     last_dnd_fetch: Option<Box<dyn TypedData>>,
@@ -45,7 +45,7 @@ impl Application {
         let drag_icon = load_icon(DRAG_IMAGE);
         let drag_image_data = Arc::new(image::load_from_memory(DRAG_IMAGE).unwrap().into_rgb8());
         Self {
-            window: None,
+            surface: None,
             last_dnd_fetch: None,
             last_drag_start: None,
             drag_icon,
