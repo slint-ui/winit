@@ -35,16 +35,13 @@ use crate::state::WinitState;
 impl DataSourceHandler for WinitState {
     fn accept_mime(
         &mut self,
-        conn: &Connection,
-        qh: &QueueHandle<Self>,
-        source: &WlDataSource,
-        mime: Option<String>,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlDataSource,
+        _: Option<String>,
     ) {
-        let _ = mime;
-        let _ = source;
-        let _ = qh;
-        let _ = conn;
-        // This is unnecessary.
+        // This method isn't a necessary part of the protocol, it's a holdover from the first
+        // version of DnD in Wayland and now just serves as a hint.
     }
 
     fn send_request(
