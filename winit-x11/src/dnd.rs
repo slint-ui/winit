@@ -12,7 +12,13 @@ use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, Type
 use x11rb::protocol::xproto::{self, ConnectionExt};
 
 use crate::atoms::AtomName::None as DndNone;
-use crate::atoms::*;
+use crate::atoms::{
+    ApplicationRtf, Atoms, AudioAac, AudioAiff, AudioFlac, AudioMpeg, AudioOgg, AudioVndWav,
+    AudioVndWave, AudioWav, AudioWave, AudioXWav, ImageBmp, ImageGif, ImageJpeg, ImagePjpeg,
+    ImagePng, ImageRaw, ImageSvg, ImageTiff, ImageWebp, ImageXIcon, SAVE_TARGETS, STRING, TARGETS,
+    TextHtml, TextHtmlCharsetUtf8, TextPlain, TextPlainCharsetUtf8, TextUriList, UTF8_STRING,
+    XdndActionPrivate, XdndFinished, XdndSelection, XdndStatus, XdndTypeList,
+};
 use crate::deadlock_sentinel::{DeadlockSentinel, DeadlockSentinelReader};
 use crate::event_loop::{CookieResultExt, X11Error};
 use crate::util;
@@ -182,7 +188,7 @@ impl SelectionReader {
 }
 
 impl TypedData for SelectionReader {
-    fn try_read(&mut self) -> Option<Box<dyn io::BufRead>> {
+    fn try_read(&self) -> Option<Box<dyn io::BufRead>> {
         Some(Box::new(self.clone()))
     }
 
@@ -190,7 +196,7 @@ impl TypedData for SelectionReader {
         &self.type_
     }
 
-    fn try_as_string(&mut self) -> io::Result<String> {
+    fn try_as_string(&self) -> io::Result<String> {
         fn invalid_data<E>(err: E) -> io::Error
         where
             E: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -233,7 +239,7 @@ impl TypedData for SelectionReader {
         }
     }
 
-    fn try_as_uris(&mut self) -> io::Result<Vec<OsString>> {
+    fn try_as_uris(&self) -> io::Result<Vec<OsString>> {
         if self.type_().hint() != Some(TypeHint::UriList) {
             return Err(io::ErrorKind::InvalidData.into());
         }
@@ -279,7 +285,7 @@ pub struct DragState {
     // Populated by Xdnd* event handlers
     pub target_window: xproto::Window,
     // Populated by `fetch_data_transfer`
-    pub last_fetched_selection: Option<SelectionFetchState>,
+    pub pending_fetch_types: Vec<SelectionType>,
     /// Whether the drag operation is accepted (or `None` if the user never indicated that it's
     /// accepted or rejected)
     // Populated by `Window::accept_drag`/`Window::reject_drag`.
@@ -296,7 +302,7 @@ impl Default for DragState {
             types: Default::default(),
             source_window: Default::default(),
             target_window: Default::default(),
-            last_fetched_selection: Default::default(),
+            pending_fetch_types: Default::default(),
             accepted: Default::default(),
         }
     }
@@ -454,13 +460,13 @@ impl Dnd {
         let (accepted, action) =
             if state.accepted { (1, atoms[XdndActionPrivate]) } else { (0, atoms[DndNone]) };
         self.xconn
-            .send_client_msg(target_window, target_window, atoms[XdndFinished] as _, None, [
-                this_window,
-                accepted,
-                action as _,
-                0,
-                0,
-            ])?
+            .send_client_msg(
+                target_window,
+                target_window,
+                atoms[XdndFinished] as _,
+                None,
+                [this_window, accepted, action as _, 0, 0],
+            )?
             .ignore_error();
 
         Ok(())
@@ -505,13 +511,13 @@ impl Dnd {
             DndState::Rejected => (0, atoms[DndNone]),
         };
         self.xconn
-            .send_client_msg(target_window, target_window, atoms[XdndStatus] as _, None, [
-                this_window,
-                accepted,
-                0,
-                0,
-                action as _,
-            ])?
+            .send_client_msg(
+                target_window,
+                target_window,
+                atoms[XdndStatus] as _,
+                None,
+                [this_window, accepted, 0, 0, action as _],
+            )?
             .ignore_error();
 
         Ok(())
@@ -521,7 +527,7 @@ impl Dnd {
 
         // Never fetched
         let last_fetch =
-            state.last_fetched_selection.as_ref().ok_or(util::GetPropertyError::Unknown)?;
+            state.pending_fetch_types.as_ref().ok_or(util::GetPropertyError::Unknown)?;
 
         let atoms = self.xconn.atoms();
         let type_ = last_fetch.type_.atom();

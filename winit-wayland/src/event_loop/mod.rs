@@ -1,7 +1,7 @@
 //! The event-loop routines.
 
 use std::cell::{Cell, RefCell};
-use std::io::Result as IOResult;
+use std::io::{self, Read, Result as IOResult};
 use std::ops::BitOr;
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
@@ -11,11 +11,12 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::{fmt, mem};
 
+use calloop::PostAction;
 use calloop::ping::Ping;
 use dpi::LogicalSize;
 use rustix::event::{PollFd, PollFlags};
 use rustix::pipe::{self, PipeFlags};
-use sctk::data_device_manager::data_offer;
+use sctk::data_device_manager::{ReadPipe, data_offer};
 use sctk::reexports::calloop_wayland_source::WaylandSource;
 use sctk::reexports::client::{Connection, QueueHandle, globals};
 use sctk::shell::WaylandSurface;
@@ -25,15 +26,13 @@ use wayland_client::protocol::wl_data_device_manager::DndAction as WlDndAction;
 use wayland_client::protocol::wl_shm::Format;
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{CustomCursor as CoreCustomCursor, CustomCursorSource};
-use winit_core::data_transfer::{
-    DataTransfer, DataTransferId, DataTransferSend, TransferType, TypedData,
-};
+use winit_core::data_transfer::{DataTransfer, DataTransferId, DataTransferSend, TransferType};
 use winit_core::error::{EventLoopError, NotSupportedError, OsError, RequestError};
 use winit_core::event::{DeviceEvent, StartCause, SurfaceSizeWriter, WindowEvent};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndAction, DragIcon,
-    OwnedDisplayHandle as CoreOwnedDisplayHandle,
+    ActiveEventLoop as RootActiveEventLoop, AsyncRequestSerial, ControlFlow, DeviceEvents,
+    DndAction, DragIcon, OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
 use winit_core::icon::RgbaIcon;
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
@@ -695,8 +694,8 @@ impl RootActiveEventLoop for ActiveEventLoop {
         &self,
         id: DataTransferId,
         type_: &dyn TransferType,
-    ) -> Result<Box<dyn TypedData>, RequestError> {
-        let state = self.state.borrow();
+    ) -> Result<AsyncRequestSerial, RequestError> {
+        let state = self.state.borrow_mut();
         let Some(current_drag) = state.dnd_state.receive_drag() else {
             return Err(RequestError::Ignored);
         };
@@ -715,12 +714,43 @@ impl RootActiveEventLoop for ActiveEventLoop {
         let (readfd, writefd) =
             pipe::pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK).map_err(|e| os_error!(e))?;
 
+        let async_request_serial = AsyncRequestSerial::get();
+
+        let mut buffer = Vec::new();
+        let window_id = current_drag.window_id();
+        let mut mime_type = Some(mime_type.clone());
+
+        let _ = state.loop_handle.insert_source(
+            // TODO: Cloning is wrong here, we should send the data with a ringbuf.
+            ReadPipe::from(readfd.try_clone().unwrap()),
+            move |_, file, state| {
+                // SAFETY: We do not overwrite the referent of `file`
+                let file = unsafe { file.get_mut() };
+
+                let result = match file.read_to_end(&mut buffer) {
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => return PostAction::Continue,
+                    Ok(_) => Ok(mem::take(&mut buffer)),
+                    Err(e) => Err(Arc::new(e)),
+                };
+
+                state.events_sink.push_window_event(
+                    WindowEvent::DataTransferReceived {
+                        id,
+                        serial: async_request_serial,
+                        // `unwrap` is safe here, as we always return `PostAction::Remove` in this branch.
+                        value: Arc::new(MimeData::new(mime_type.take().unwrap(), result)),
+                    },
+                    window_id,
+                );
+
+                PostAction::Remove
+            },
+        );
+
         current_drag.accept(current_drag.serial(), Some(mime_type_str.clone()));
         data_offer::receive_to_fd(current_drag, mime_type_str, writefd);
 
-        let mime_type = mime_type.clone();
-
-        Ok(Box::new(MimeData::new(readfd, mime_type)))
+        Ok(async_request_serial)
     }
 
     fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
@@ -854,8 +884,11 @@ impl RootActiveEventLoop for ActiveEventLoop {
             surface.commit();
         }
 
+        let data_device_id = data_device.inner().id();
+
         state.dnd_state.set_send_drag(DragSource::new(
             transfer_id,
+            data_device_id,
             data_source,
             send_data,
             icon_surface,

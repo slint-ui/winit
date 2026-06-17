@@ -32,7 +32,9 @@ use x11rb::protocol::xproto::{self, ConnectionExt as _, ModMask};
 use x11rb::x11_utils::{ExtensionInformation, Serialize};
 use xkbcommon_dl::xkb_mod_mask_t;
 
-use crate::atoms::*;
+use crate::atoms::{
+    _XSETTINGS_SETTINGS, XdndDrop, XdndEnter, XdndLeave, XdndPosition, XdndSelection,
+};
 use crate::dnd::{DndState, SelectionType};
 use crate::event_loop::{
     ALL_DEVICES, ActiveEventLoop, CookieResultExt, Device, DeviceInfo, DeviceType,
@@ -459,10 +461,11 @@ impl EventProcessor {
                 dnd.init_state(version, source_window, window, types.into()).transfer_id
             };
 
-            app.window_event(&self.target, window_id, WindowEvent::DragEntered {
-                id: transfer_id,
-                position: None,
-            });
+            app.window_event(
+                &self.target,
+                window_id,
+                WindowEvent::DragEntered { id: transfer_id, position: None },
+            );
             return;
         }
 
@@ -522,10 +525,15 @@ impl EventProcessor {
                 state.transfer_id
             };
 
-            app.window_event(&self.target, window_id, WindowEvent::DragPosition {
-                id: transfer_id,
-                position: PhysicalPosition::new(coords.dst_x as f64, coords.dst_y as f64),
-            });
+            app.window_event(
+                &self.target,
+                window_id,
+                WindowEvent::DragPosition {
+                    id: transfer_id,
+                    position: PhysicalPosition::new(coords.dst_x as f64, coords.dst_y as f64),
+                    proposed_action: None,
+                },
+            );
 
             return;
         }
@@ -568,9 +576,11 @@ impl EventProcessor {
             let Some(state) = &dnd.state else {
                 return;
             };
-            app.window_event(&self.target, window_id, WindowEvent::DragLeft {
-                id: state.transfer_id,
-            });
+            app.window_event(
+                &self.target,
+                window_id,
+                WindowEvent::DragLeft { id: state.transfer_id },
+            );
         }
     }
 
@@ -706,10 +716,14 @@ impl EventProcessor {
                 drop(shared_state_lock);
 
                 let surface_size = Arc::new(Mutex::new(new_surface_size));
-                app.window_event(&self.target, window_id, WindowEvent::ScaleFactorChanged {
-                    scale_factor: new_scale_factor,
-                    surface_size_writer: SurfaceSizeWriter::new(Arc::downgrade(&surface_size)),
-                });
+                app.window_event(
+                    &self.target,
+                    window_id,
+                    WindowEvent::ScaleFactorChanged {
+                        scale_factor: new_scale_factor,
+                        surface_size_writer: SurfaceSizeWriter::new(Arc::downgrade(&surface_size)),
+                    },
+                );
 
                 let new_surface_size = *surface_size.lock().unwrap();
                 drop(surface_size);

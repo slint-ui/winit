@@ -24,8 +24,8 @@ use winit_core::error::{EventLoopError, NotSupportedError, RequestError};
 use winit_core::event::{DeviceId, StartCause, WindowEvent};
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndAction,
-    EventLoopProxy as CoreEventLoopProxy, EventLoopProxyProvider,
+    ActiveEventLoop as RootActiveEventLoop, AsyncRequestSerial, ControlFlow, DeviceEvents,
+    DndAction, EventLoopProxy as CoreEventLoopProxy, EventLoopProxyProvider,
     OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
@@ -37,7 +37,10 @@ use x11rb::protocol::{xkb, xproto};
 use x11rb::x11_utils::X11Error as LogicalError;
 use x11rb::xcb_ffi::ReplyOrIdError;
 
-use crate::atoms::*;
+use crate::atoms::{
+    _NET_WM_PING, _NET_WM_SYNC_REQUEST, ABS_PRESSURE, ABS_TILT_X, ABS_TILT_Y, ABS_X, ABS_Y, Atoms,
+    WM_DELETE_WINDOW,
+};
 use crate::deadlock_sentinel::DeadlockSentinelGuard;
 use crate::dnd::{Dnd, SelectionFetchState};
 use crate::event_processor::{EventProcessor, MAX_MOD_REPLAY_LEN};
@@ -785,7 +788,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
         &self,
         id: DataTransferId,
         type_: &dyn TransferType,
-    ) -> Result<Box<dyn TypedData>, RequestError> {
+    ) -> Result<AsyncRequestSerial, RequestError> {
         let mut dnd = self.dnd.borrow_mut();
 
         if dnd.state.as_ref().is_none_or(|state| state.transfer_id != id) {
@@ -801,14 +804,6 @@ impl RootActiveEventLoop for ActiveEventLoop {
             .ok_or(RequestError::NotSupported(NotSupportedError::new("Unknown type hint")))?;
         let deadlock_sentinel = dnd.deadlock_sentinel.reader();
 
-        let mut new_state = dnd
-            .state
-            .as_mut()
-            .ok_or(RequestError::Ignored)?
-            .last_fetched_selection
-            .take()
-            .filter(|state| state.type_() == &type_);
-
         let Some(target_window) = dnd.state.as_ref().map(|s| s.target_window) else {
             return Err(RequestError::Ignored);
         };
@@ -821,7 +816,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
                     dnd.convert_selection(target_window, self.xconn.timestamp(), type_.atom());
                 }
 
-                SelectionFetchState::new(type_)
+                type_
             })
             .as_reader(deadlock_sentinel);
 
@@ -829,7 +824,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
             return Err(RequestError::Ignored);
         };
 
-        state.last_fetched_selection = new_state;
+        state.pending_fetch_types = new_state;
 
         Ok(Box::new(reader))
     }
@@ -1141,15 +1136,18 @@ impl Device {
                 let ty = unsafe { (*class_ptr)._type };
                 if ty == ffi::XIScrollClass {
                     let info = unsafe { &*(class_ptr as *const ffi::XIScrollClassInfo) };
-                    scroll_axes.push((info.number, ScrollAxis {
-                        increment: info.increment,
-                        orientation: match info.scroll_type {
-                            ffi::XIScrollTypeHorizontal => ScrollOrientation::Horizontal,
-                            ffi::XIScrollTypeVertical => ScrollOrientation::Vertical,
-                            _ => unreachable!(),
+                    scroll_axes.push((
+                        info.number,
+                        ScrollAxis {
+                            increment: info.increment,
+                            orientation: match info.scroll_type {
+                                ffi::XIScrollTypeHorizontal => ScrollOrientation::Horizontal,
+                                ffi::XIScrollTypeVertical => ScrollOrientation::Vertical,
+                                _ => unreachable!(),
+                            },
+                            position: 0.0,
                         },
-                        position: 0.0,
-                    }));
+                    ));
                 } else if ty == ffi::XITouchClass {
                     r#type = Some(DeviceType::Touch);
                 } else if r#type.is_none() && ty == ffi::XIValuatorClass {

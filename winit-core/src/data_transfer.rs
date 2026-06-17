@@ -172,12 +172,32 @@ impl_dyn_casting!(TransferType);
 /// error with [`io::ErrorKind::Deadlock`]. For now, the only way to access the data is via blocking
 /// on the event loop, so simply retrying the next time an event is received that references the
 /// data transfer should be enough to ensure that the data is accessible.
-pub trait TypedData: AsAny + fmt::Debug {
+pub trait TypedData: AsAny + fmt::Debug + Send + Sync {
     /// The type of this `TypedData`.
     fn type_(&self) -> &dyn TransferType;
 
     /// If this value is readable as bytes, return a reader than can be used to read those bytes.
-    fn try_read(&mut self) -> Option<Box<dyn io::BufRead>>;
+    ///
+    /// On some platforms, the reader must be driven incrementally upon each
+    /// [`WindowEvent::DragDataReceived`](crate::event::WindowEvent::DragDataReceived)`. If you
+    /// don't need to stream the data and just want the bytes in a single buffer, use [`TypedData::try_as_bytes`].
+    fn try_read(&self) -> Option<Box<dyn io::BufRead>>;
+
+    /// If this value is readable as bytes, return those bytes.
+    ///
+    /// If this returns [`WouldBlock`](std::io::ErrorKind::WouldBlock), then it should be called
+    /// again upon next receiving [`WindowEvent::DragDataReceived`](crate::event::WindowEvent::DragDataReceived)
+    fn try_as_bytes(&self) -> io::Result<Vec<u8>> {
+        let mut reader = self
+            .try_read()
+            .ok_or_else(|| io::Error::other("This `TypedData` was not readable as bytes"))?;
+
+        let mut out = Vec::new();
+
+        reader.read_to_end(&mut out)?;
+
+        Ok(out)
+    }
 
     /// Read this value as a list of URIs.
     ///
@@ -185,20 +205,32 @@ pub trait TypedData: AsAny + fmt::Debug {
     ///
     /// The format of the returned URIs is simply a vector of strings. No validation is done
     /// to ensure that the URIs are valid or in the format
-    fn try_as_uris(&mut self) -> io::Result<Vec<OsString>>;
+    ///
+    /// If this returns [`WouldBlock`](std::io::ErrorKind::WouldBlock), then it should be called
+    /// again upon next receiving [`WindowEvent::DragDataReceived`](crate::event::WindowEvent::DragDataReceived)
+    fn try_as_uris(&self) -> io::Result<Vec<OsString>>;
 
     /// Read this value as a plain text string.
     ///
     /// If this value is not readable as a string, return `None`.
-    fn try_as_string(&mut self) -> io::Result<String>;
+    ///
+    /// If this returns [`WouldBlock`](std::io::ErrorKind::WouldBlock), then it should be called
+    /// again upon next receiving [`WindowEvent::DragDataReceived`](crate::event::WindowEvent::DragDataReceived)
+    fn try_as_string(&self) -> io::Result<String>;
+}
+
+// Required for `WindowEvent` to implement `PartialEq` - we just implement this on a best-effort basis.
+impl PartialEq for dyn TypedData {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::addr_eq(self, other)
+    }
 }
 
 impl_dyn_casting!(TypedData);
 
 /// Metadata about a data transfer. This does not allow actually receiving data, as that is an
 /// asynchronous operation. To fetch the data from the source application, see
-/// [`Window::fetch_data_transfer`](crate::window::Window::fetch_data_transfer)
-/// and [`WindowEvent::DataTransferResult`](crate::event::WindowEvent::DataTransferResult).
+/// [`Window::fetch_data_transfer`](crate::window::Window::fetch_data_transfer).
 pub trait DataTransfer: AsAny + fmt::Debug {
     /// Iterate over each type advertized by this `DataTransfer`. This is just a minor optimization,
     /// in most cases you should probably use [`has_type`](DataTransfer::has_type) or

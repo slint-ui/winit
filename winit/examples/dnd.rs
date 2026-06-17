@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dpi::PhysicalPosition;
-use image::RgbImage;
+use image::{imageops::FilterType, DynamicImage, GenericImageView, RgbImage};
 use softbuffer::{Context, Surface};
 use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
@@ -26,6 +26,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let app = Application::new();
     Ok(event_loop.run_app(app)?)
+}
+
+struct DndFetch {
+    data: Box<dyn TypedData>,
+    bytes: Vec<u8>,
 }
 
 /// Application state and event handling.
@@ -116,6 +121,11 @@ impl ApplicationHandler for Application {
                             let hint = ty.hint()?;
                             match hint {
                                 TypeHint::Image { extension_hint } => {
+                                    let image = DynamicImage::from((**image).clone());
+                                    let (w, h) = image.dimensions();
+                                    let image = image
+                                        .resize(w * 8, h * 8, FilterType::Gaussian)
+                                        .into_rgb8();
                                     let ext = extension_hint.unwrap_or("png");
                                     info!("Destination requested image as {ext}, converting...");
                                     let format = image::ImageFormat::from_extension(ext)?;
@@ -140,51 +150,47 @@ impl ApplicationHandler for Application {
                 info!("{event:?}");
                 self.last_dnd_fetch = None;
             },
-            WindowEvent::DragPosition { .. } => {
-                info!("{event:?}");
-            },
-            WindowEvent::DragDropped { .. } => {
+            WindowEvent::DragDataReceived { .. } => {
                 info!("{event:?}");
 
-                let Some(mut data) = self.last_dnd_fetch.take() else {
+                let Some(data) = &mut self.last_dnd_fetch else {
                     return;
                 };
 
                 match data.type_().hint() {
                     Some(TypeHint::Plaintext | TypeHint::Html) => {
-                        let text = data.try_as_string().unwrap();
+                        let Ok(text) = data.try_as_string() else {
+                            return;
+                        };
                         info!("{text:?}");
                     },
                     Some(TypeHint::UriList) => {
-                        let uris = data.try_as_uris().unwrap();
+                        let Ok(uris) = data.try_as_uris() else {
+                            return;
+                        };
                         info!("{uris:#?}");
                     },
                     Some(TypeHint::Image { extension_hint: ext }) => {
-                        let mut bytes = Vec::new();
-                        'read_image: {
-                            if data.try_read().unwrap().read_to_end(&mut bytes).is_err() {
-                                warn!("Could not read!");
-                                break 'read_image;
-                            }
+                        let Ok(bytes) = data.try_as_bytes() else {
+                            return;
+                        };
+                        let format = ext.and_then(image::ImageFormat::from_extension);
 
-                            let format = ext.and_then(image::ImageFormat::from_extension);
+                        let reader = std::io::Cursor::new(&bytes[..]);
+                        let reader = match format {
+                            Some(fmt) => image::ImageReader::with_format(reader, fmt),
+                            None => image::ImageReader::new(reader),
+                        };
 
-                            let reader = std::io::Cursor::new(&bytes[..]);
-                            let reader = match format {
-                                Some(fmt) => image::ImageReader::with_format(reader, fmt),
-                                None => image::ImageReader::new(reader),
-                            };
-
-                            match reader.decode() {
-                                Ok(image) => {
-                                    let width = image.width();
-                                    let height = image.height();
-                                    info!("Received image ({width}x{height})");
-                                },
-                                Err(err) => {
-                                    warn!("Failed to decode image: {err}");
-                                },
-                            }
+                        match reader.decode() {
+                            Ok(image) => {
+                                let width = image.width();
+                                let height = image.height();
+                                info!("Received image ({width}x{height})");
+                            },
+                            Err(err) => {
+                                warn!("Failed to decode image: {err}");
+                            },
                         }
                     },
                     _ => {
@@ -192,6 +198,10 @@ impl ApplicationHandler for Application {
                     },
                 }
             },
+            WindowEvent::DragPosition { .. } => {
+                info!("{event:?}");
+            },
+            WindowEvent::DragDropped { .. } => {},
             WindowEvent::DragEntered { id, .. } => {
                 info!("{event:?}");
 

@@ -14,9 +14,7 @@ use rwh_06::{DisplayHandle, HandleError, HasDisplayHandle};
 use crate::Instant;
 use crate::as_any::AsAny;
 use crate::cursor::{CustomCursor, CustomCursorSource};
-use crate::data_transfer::{
-    DataTransfer, DataTransferId, DataTransferSend, TransferType, TypedData,
-};
+use crate::data_transfer::{DataTransfer, DataTransferId, DataTransferSend, TransferType};
 use crate::error::{NotSupportedError, RequestError};
 use crate::icon::Icon;
 use crate::monitor::MonitorHandle;
@@ -127,7 +125,7 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
         &self,
         id: DataTransferId,
         type_: &dyn TransferType,
-    ) -> Result<Box<dyn TypedData>, RequestError> {
+    ) -> Result<AsyncRequestSerial, RequestError> {
         let _ = id;
         let _ = type_;
         Err(RequestError::NotSupported(NotSupportedError::new(
@@ -190,6 +188,15 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
     /// Some platforms have a more-expressive way of setting the visual component of a drag
     /// operation. For those platforms, consider using the platform-specific implementation of
     /// [`DataTransferSend`] for `send_data` and set this field to `None`.
+    ///
+    /// ### Returns
+    ///
+    /// A `DataTransferId` that can be used to identify this drag operation when events are received
+    /// such as `OutgoingDragEnded`. Note that if a drag-and-drop operation starts and ends from the
+    /// same window or process, the transfer ID that is reported by `DragEntered` is _not_ guaranteed
+    /// to be the same as the one returned by this method. On most platforms, it should be safe to make the
+    /// assumption that if an outgoing drag is still in progress, then any incoming drag is the same
+    /// operation. However, that assumption is not encoded in winit to avoid misleading users.
     fn start_drag(
         &self,
         source: WindowId,

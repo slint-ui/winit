@@ -2,14 +2,17 @@
 
 #![warn(missing_docs)]
 
+mod send_data;
+
 use std::ffi::OsString;
 use std::fmt;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read, Write};
+
+use std::io::{self, BufRead, Cursor, ErrorKind};
 use std::ops::{BitOr, Deref};
-use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStringExt;
 use std::sync::Arc;
 
+use calloop::PostAction;
 use dpi::{LogicalPosition, PhysicalPosition};
 use sctk::data_device_manager::WritePipe;
 use sctk::data_device_manager::data_device::{DataDeviceData, DataDeviceHandler};
@@ -29,6 +32,7 @@ use winit_core::event::WindowEvent;
 use winit_core::event_loop::DndAction;
 use winit_core::window::WindowId;
 
+use crate::dnd::send_data::SendDataEncoder;
 use crate::make_data_transfer_id;
 use crate::state::WinitState;
 
@@ -50,7 +54,7 @@ impl DataSourceHandler for WinitState {
         _: &QueueHandle<Self>,
         _: &WlDataSource,
         mime: String,
-        mut fd: WritePipe,
+        fd: WritePipe,
     ) {
         let Some(data) = self.dnd_state.send_drag_data_mut() else {
             // TODO: Is there a way to explicitly express that the data was not sent?
@@ -63,35 +67,12 @@ impl DataSourceHandler for WinitState {
             return;
         };
 
-        match send_data {
-            SendData::Uris(os_strings) => {
-                let mut iter = os_strings.into_iter();
-                let Some(first) = iter.next() else {
-                    return;
-                };
-
-                if fd.write_all(first.as_encoded_bytes()).is_err() {
-                    return;
-                }
-
-                // TODO: Is there something better we can do than unconditionally encoding as
-                // `text/uri-list`?
-                for os_str in iter {
-                    // TODO: Is `as_encoded_bytes` correct here?
-                    if fd
-                        .write_all(b"\r\n")
-                        .and_then(|()| fd.write_all(os_str.as_encoded_bytes()))
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-            },
+        let mut encoder = match send_data {
+            SendData::Uris(os_strings) => SendDataEncoder::Uris(os_strings.into()),
             SendData::String(str) => match mime.parse_charset().unwrap_or(mime.default_charset()) {
-                Charset::Utf8 => {
-                    let _ = fd.write_all(str.as_bytes());
-                },
+                Charset::Utf8 => SendDataEncoder::Bytes(Cursor::new(str.into_bytes())),
                 Charset::Utf16 => {
+                    // TODO: It wouldn't be too difficult to make this lazy
                     let utf16_binary = str
                         .encode_utf16()
                         // I can't find any documentation on whether Wayland UTF-16 is required to
@@ -99,13 +80,30 @@ impl DataSourceHandler for WinitState {
                         // we'll make the assumption that it's consistent cross-platform for now.
                         .flat_map(|uint16| uint16.to_le_bytes())
                         .collect::<Vec<_>>();
-                    let _ = fd.write_all(&utf16_binary);
+                    SendDataEncoder::Bytes(Cursor::new(utf16_binary))
                 },
             },
-            SendData::Bytes(binary) => {
-                let _ = fd.write_all(&binary);
-            },
-        }
+            SendData::Bytes(binary) => SendDataEncoder::Bytes(Cursor::new(binary)),
+        };
+
+        let _ = self.loop_handle.insert_source(fd, move |_, file, _| {
+            // Safety: We only mutate `file` in-place and do not replace and drop it.
+            let file = unsafe { file.get_mut() };
+            loop {
+                match std::io::copy(&mut encoder, file) {
+                    Ok(0) => {
+                        break PostAction::Remove;
+                    },
+                    Ok(_) => {},
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                        break PostAction::Continue;
+                    },
+                    Err(_) => {
+                        break PostAction::Remove;
+                    },
+                }
+            }
+        });
     }
 
     // TODO: Send `DragCancel` event.
@@ -349,23 +347,26 @@ impl TransferType for MimeType {
     }
 }
 
-/// In-progress typed data transfer from another application.
+type BytesResult = Result<Vec<u8>, Arc<io::Error>>;
+
+/// Typed data transfer from another application.
 #[derive(Debug)]
 pub struct MimeData {
     mime_type: MimeType,
-    fd: Option<OwnedFd>,
+    result: BytesResult,
 }
 
 impl MimeData {
-    pub(crate) fn new(fd: OwnedFd, mime_type: MimeType) -> Self {
-        Self { mime_type, fd: Some(fd) }
+    pub(crate) fn new(mime_type: MimeType, result: BytesResult) -> Self {
+        Self { mime_type, result }
     }
 
-    fn try_as_file(&mut self) -> Option<File> {
-        // TODO: Is it ok that this may only work once, depending on what the fd points to?
-        let fd_clone =
-            if let Ok(cloned) = self.fd.as_ref()?.try_clone() { cloned } else { self.fd.take()? };
-        Some(fd_clone.into())
+    fn data(&self) -> io::Result<&[u8]> {
+        fn arc_to_io_error(arc: Arc<io::Error>) -> io::Error {
+            io::Error::new(arc.kind(), arc)
+        }
+
+        self.result.as_deref().map_err(|e| arc_to_io_error(e.clone()))
     }
 }
 
@@ -374,54 +375,43 @@ impl TypedData for MimeData {
         &self.mime_type
     }
 
-    fn try_read(&mut self) -> Option<Box<dyn io::BufRead>> {
-        Some(Box::new(BufReader::new(self.try_as_file()?)))
+    fn try_read(&self) -> Option<Box<dyn io::BufRead>> {
+        let data = self.data().ok()?.to_owned();
+
+        Some(Box::new(io::Cursor::new(data)))
     }
 
-    fn try_as_uris(&mut self) -> io::Result<Vec<OsString>> {
-        let Some(file) = self.try_as_file() else {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "This `MimeData` was already read, and the underlying file descriptor does not \
-                 support cloning",
-            ));
-        };
+    fn try_as_bytes(&self) -> io::Result<Vec<u8>> {
+        self.data().map(ToOwned::to_owned)
+    }
 
-        BufReader::new(file)
+    fn try_as_uris(&self) -> io::Result<Vec<OsString>> {
+        let data = self.data()?;
+
+        Cursor::new(&data)
             .lines()
             .filter(|result| match result {
                 Ok(s) => !s.starts_with('#'),
                 // We want to maintain errors, so the final `collect` returns an error too
                 Err(_) => true,
             })
-            .map(|res| res.map(OsString::from))
+            .map(|res| {
+                Ok(OsString::from_vec(percent_encoding::percent_decode_str(&res?).collect()))
+            })
             .collect()
     }
 
-    fn try_as_string(&mut self) -> io::Result<String> {
-        let Some(mut file) = self.try_as_file() else {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "This `MimeData` was already read, and the underlying file descriptor does not \
-                 support cloning",
-            ));
-        };
-
+    fn try_as_string(&self) -> io::Result<String> {
         let charset = self.mime_type.parse_charset().unwrap_or(self.mime_type.default_charset());
 
+        let data = self.data()?;
+
         match charset {
-            Charset::Utf8 => {
-                let mut out = String::new();
-                file.read_to_string(&mut out)?;
-
-                Ok(out)
-            },
+            Charset::Utf8 => String::from_utf8(data.to_vec())
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err)),
             Charset::Utf16 => {
-                let mut bytes = Vec::<u8>::new();
-                file.read_to_end(&mut bytes)?;
-
                 // TODO: `from_utf16le` once it's stable
-                let utf_16 = bytes
+                let utf_16 = data
                     .chunks_exact(2)
                     .map(|chunk| {
                         let arr: [u8; 2] = chunk.try_into().unwrap();
@@ -541,6 +531,7 @@ pub struct DragSource {
     /// This is stored internally, as if this source is dropped then the
     /// drag operation will be cancelled.
     _data_source: SctkDragSource,
+    pub(crate) data_device_id: ObjectId,
     /// The supplied [`DataTransferSend`].
     pub(crate) data: Box<dyn DataTransferSend>,
     pub(crate) selected_action: WlDndAction,
@@ -552,6 +543,7 @@ pub struct DragSource {
 impl DragSource {
     pub(crate) fn new(
         data_transfer_id: DataTransferId,
+        data_device_id: ObjectId,
         data_source: SctkDragSource,
         data: Box<dyn DataTransferSend>,
         icon: Option<WlSurface>,
@@ -559,6 +551,7 @@ impl DragSource {
     ) -> Self {
         Self {
             data_transfer_id,
+            data_device_id,
             _data_source: data_source,
             data,
             selected_action: WlDndAction::None,
@@ -652,6 +645,11 @@ impl DataDeviceHandler for WinitState {
         let Some(data) = data_device.data::<DataDeviceData>() else {
             return;
         };
+
+        if let Some(drag_send) = &self.dnd_state.send_drag {
+            if drag_send.data_device_id == data_device.id() {}
+        }
+
         let Some(drag) = data.drag_offer() else {
             // Selections are not yet implemented
             return;
@@ -730,6 +728,18 @@ impl DataDeviceHandler for WinitState {
             return;
         };
 
+        // `selected_action` should only contain a single flag, but we check with `contains`
+        // just in case we or the compositor misunderstood the spec.
+        let proposed_action = if drag.selected_action.contains(WlDndAction::Move) {
+            Some(DndAction::Move)
+        } else if drag.selected_action.contains(WlDndAction::Copy) {
+            Some(DndAction::Copy)
+        } else if drag.selected_action.contains(WlDndAction::Ask) {
+            Some(DndAction::Ask)
+        } else {
+            None
+        };
+
         let Some(current_drag) = self.dnd_state.receive_drag() else {
             return;
         };
@@ -745,7 +755,7 @@ impl DataDeviceHandler for WinitState {
         let position: PhysicalPosition<f64> = LogicalPosition::new(x, y).to_physical(scale_factor);
 
         self.events_sink.push_window_event(
-            WindowEvent::DragPosition { id: current_drag.transfer_id(), position },
+            WindowEvent::DragPosition { id: current_drag.transfer_id(), position, proposed_action },
             window_id,
         );
     }
