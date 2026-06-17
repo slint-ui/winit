@@ -15,7 +15,6 @@ macro_rules! os_error {
 
 mod activation;
 mod atoms;
-mod deadlock_sentinel;
 mod dnd;
 mod event_loop;
 mod event_processor;

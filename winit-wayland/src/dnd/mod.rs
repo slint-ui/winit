@@ -531,7 +531,6 @@ pub struct DragSource {
     /// This is stored internally, as if this source is dropped then the
     /// drag operation will be cancelled.
     _data_source: SctkDragSource,
-    pub(crate) data_device_id: ObjectId,
     /// The supplied [`DataTransferSend`].
     pub(crate) data: Box<dyn DataTransferSend>,
     pub(crate) selected_action: WlDndAction,
@@ -543,7 +542,6 @@ pub struct DragSource {
 impl DragSource {
     pub(crate) fn new(
         data_transfer_id: DataTransferId,
-        data_device_id: ObjectId,
         data_source: SctkDragSource,
         data: Box<dyn DataTransferSend>,
         icon: Option<WlSurface>,
@@ -551,7 +549,6 @@ impl DragSource {
     ) -> Self {
         Self {
             data_transfer_id,
-            data_device_id,
             _data_source: data_source,
             data,
             selected_action: WlDndAction::None,
@@ -645,10 +642,6 @@ impl DataDeviceHandler for WinitState {
         let Some(data) = data_device.data::<DataDeviceData>() else {
             return;
         };
-
-        if let Some(drag_send) = &self.dnd_state.send_drag {
-            if drag_send.data_device_id == data_device.id() {}
-        }
 
         let Some(drag) = data.drag_offer() else {
             // Selections are not yet implemented

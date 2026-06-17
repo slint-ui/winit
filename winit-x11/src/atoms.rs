@@ -90,7 +90,7 @@ atom_manager! {
     XdndDrop,
     XdndPosition,
     XdndStatus,
-    XdndActionPrivate,
+    XdndActionCopy,
     XdndSelection,
     XdndFinished,
     XdndTypeList,

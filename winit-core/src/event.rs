@@ -1632,7 +1632,7 @@ mod tests {
             with_window_event(Moved((0, 0).into()));
             with_window_event(SurfaceResized((0, 0).into()));
             with_window_event(DragEntered { id: dnd_data, position: None });
-            with_window_event(DragPosition { id: dnd_data, position: (0, 0).into() });
+            with_window_event(DragPosition { id: dnd_data, position: (0, 0).into(), proposed_action: Some(DndAction::Copy) });
             with_window_event(DragDropped { id: dnd_data, proposed_action: Some(DndAction::Copy) });
             with_window_event(DragLeft { id: dnd_data });
             with_window_event(Ime(Enabled));

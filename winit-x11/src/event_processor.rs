@@ -14,6 +14,7 @@ use winit_core::event::{
     MouseScrollDelta, PointerKind, PointerSource, RawKeyEvent, SurfaceSizeWriter, TouchPhase,
     WindowEvent,
 };
+use winit_core::event_loop::DndAction;
 use winit_core::keyboard::ModifiersState;
 use winit_core::window::WindowId;
 use x11_dl::xinput2::{
@@ -32,9 +33,7 @@ use x11rb::protocol::xproto::{self, ConnectionExt as _, ModMask};
 use x11rb::x11_utils::{ExtensionInformation, Serialize};
 use xkbcommon_dl::xkb_mod_mask_t;
 
-use crate::atoms::{
-    _XSETTINGS_SETTINGS, XdndDrop, XdndEnter, XdndLeave, XdndPosition, XdndSelection,
-};
+use crate::atoms::*;
 use crate::dnd::{DndState, SelectionType};
 use crate::event_loop::{
     ALL_DEVICES, ActiveEventLoop, CookieResultExt, Device, DeviceInfo, DeviceType,
@@ -531,7 +530,12 @@ impl EventProcessor {
                 WindowEvent::DragPosition {
                     id: transfer_id,
                     position: PhysicalPosition::new(coords.dst_x as f64, coords.dst_y as f64),
-                    proposed_action: None,
+                    // `Copy` is the default. Other actions are possible in X11, but the specification
+                    // does not properly explain how to implement them (only giving a vague description
+                    // of `XdndMove`). For simplicity's sake, we simply do not implement non-copy drag
+                    // on X11.
+                    // See https://www.freedesktop.org/wiki/Specifications/XDND/
+                    proposed_action: Some(DndAction::Copy),
                 },
             );
 
@@ -556,7 +560,15 @@ impl EventProcessor {
                 &self.target,
                 window_id,
                 // TODO
-                WindowEvent::DragDropped { id: transfer_id, proposed_action: None },
+                WindowEvent::DragDropped {
+                    id: transfer_id,
+                    // `Copy` is the default. Other actions are possible in X11, but the specification
+                    // does not properly explain how to implement them (only giving a vague description
+                    // of `XdndMove`). For simplicity's sake, we simply do not implement non-copy drag
+                    // on X11.
+                    // See https://www.freedesktop.org/wiki/Specifications/XDND/
+                    proposed_action: Some(DndAction::Copy),
+                },
             );
 
             let mut dnd = self.target.dnd.borrow_mut();
@@ -584,11 +596,10 @@ impl EventProcessor {
         }
     }
 
-    // TODO: Should we have an explicit notification for when the selection is ready?
-    fn selection_notify(&mut self, xev: &XSelectionEvent, _: &mut dyn ApplicationHandler) {
+    fn selection_notify(&mut self, xev: &XSelectionEvent, app: &mut dyn ApplicationHandler) {
         let atoms = self.target.xconn.atoms();
 
-        let window = xev.requestor as xproto::Window;
+        let xwindow = xev.requestor as xproto::Window;
 
         // Set the timestamp.
         self.target.xconn.set_timestamp(xev.time as xproto::Timestamp);
@@ -599,7 +610,39 @@ impl EventProcessor {
             return;
         }
 
-        let _ = unsafe { self.target.dnd.borrow().read_data(window) };
+        let (transfer_id, serial, type_) = {
+            let Some(state) = self.target.dnd.get_mut().state.as_mut() else {
+                return;
+            };
+
+            let Some((serial, type_)) = state.pending_fetch_types.pop_front() else {
+                return;
+            };
+
+            if xev.type_ as u32 != type_.atom() {
+                warn!(
+                    "Received `SelectionNotify` with unexpected type! Continuing, but this may be a bug."
+                );
+            }
+
+            (state.transfer_id, serial, type_)
+        };
+
+        let value = match self.target.dnd.borrow().read_data(xwindow, type_) {
+            Ok(value) => Arc::new(value),
+            Err(err) => {
+                warn!("Failed to read selection: {err}");
+                return;
+            },
+        };
+
+        let window_id = mkwid(xwindow);
+
+        app.window_event(
+            &self.target,
+            window_id,
+            WindowEvent::DataTransferReceived { id: transfer_id, serial, value },
+        );
     }
 
     fn configure_notify(&self, xev: &XConfigureEvent, app: &mut dyn ApplicationHandler) {

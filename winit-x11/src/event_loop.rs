@@ -19,7 +19,7 @@ use tracing::warn;
 use winit_common::xkb::Context;
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{CustomCursor as CoreCustomCursor, CustomCursorSource};
-use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypedData};
+use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType};
 use winit_core::error::{EventLoopError, NotSupportedError, RequestError};
 use winit_core::event::{DeviceId, StartCause, WindowEvent};
 use winit_core::event_loop::pump_events::PumpStatus;
@@ -41,8 +41,7 @@ use crate::atoms::{
     _NET_WM_PING, _NET_WM_SYNC_REQUEST, ABS_PRESSURE, ABS_TILT_X, ABS_TILT_Y, ABS_X, ABS_Y, Atoms,
     WM_DELETE_WINDOW,
 };
-use crate::deadlock_sentinel::DeadlockSentinelGuard;
-use crate::dnd::{Dnd, SelectionFetchState};
+use crate::dnd::Dnd;
 use crate::event_processor::{EventProcessor, MAX_MOD_REPLAY_LEN};
 use crate::ime::{self, Ime, ImeCreationError, ImeSender};
 use crate::util::{self, CustomCursor};
@@ -232,7 +231,7 @@ impl EventLoop {
         let net_wm_ping = atoms[_NET_WM_PING];
         let net_wm_sync_request = atoms[_NET_WM_SYNC_REQUEST];
 
-        let dnd = Dnd::new(Arc::clone(&xconn), Default::default()).into();
+        let dnd = Dnd::new(Arc::clone(&xconn)).into();
 
         let (ime_sender, ime_receiver) = mpsc::channel();
         let (ime_event_sender, ime_event_receiver) = mpsc::channel();
@@ -563,8 +562,6 @@ impl EventLoop {
     }
 
     fn single_iteration<A: ApplicationHandler>(&mut self, app: &mut A, cause: StartCause) {
-        let _guard = self.event_processor.target.selection_deadlock_guard();
-
         app.new_events(&self.event_processor.target, cause);
 
         // NB: For consistency all platforms must call `can_create_surfaces` even though X11
@@ -667,10 +664,6 @@ impl ActiveEventLoop {
     #[inline]
     pub(crate) fn x_connection(&self) -> &Arc<XConnection> {
         &self.xconn
-    }
-
-    pub(crate) fn selection_deadlock_guard(&self) -> DeadlockSentinelGuard {
-        self.dnd.borrow().deadlock_sentinel.guard()
     }
 
     /// Update the device event based on window focus.
@@ -791,42 +784,46 @@ impl RootActiveEventLoop for ActiveEventLoop {
     ) -> Result<AsyncRequestSerial, RequestError> {
         let mut dnd = self.dnd.borrow_mut();
 
-        if dnd.state.as_ref().is_none_or(|state| state.transfer_id != id) {
-            return Err(RequestError::NotSupported(NotSupportedError::new(
-                "Unknown data transfer",
-            )));
-        }
+        let serial = AsyncRequestSerial::get();
 
         let type_ = type_
             .cast_ref::<SelectionType>()
             .or_else(|| dnd.find_type_by_hint(type_.hint()?))
             .cloned()
             .ok_or(RequestError::NotSupported(NotSupportedError::new("Unknown type hint")))?;
-        let deadlock_sentinel = dnd.deadlock_sentinel.reader();
 
-        let Some(target_window) = dnd.state.as_ref().map(|s| s.target_window) else {
-            return Err(RequestError::Ignored);
+        let new_convert_selection = {
+            let Some(state) = dnd.state.as_mut() else {
+                return Err(RequestError::Ignored);
+            };
+
+            if state.transfer_id != id {
+                return Err(RequestError::NotSupported(NotSupportedError::new(
+                    "Unknown data transfer",
+                )));
+            }
+
+            // If it's non-empty, assume that we're still waiting on some other fetch operation.
+            // The `SelectionNotify` handler will send a new `convert_selection` event if any
+            // more are on the stack.
+            let should_emit_convert_selection = state.pending_fetch_types.is_empty();
+
+            let atom = type_.atom();
+
+            state.pending_fetch_types.push_back((serial, type_));
+
+            Some((state.target_window, self.xconn.timestamp(), atom))
+                .filter(|_| should_emit_convert_selection)
         };
 
-        let reader = new_state
-            .get_or_insert_with(|| {
-                // This results in the `SelectionNotify` event
-                unsafe {
-                    // TODO: Handle this better
-                    dnd.convert_selection(target_window, self.xconn.timestamp(), type_.atom());
-                }
+        if let Some((window, time, new_type)) = new_convert_selection {
+            // This results in the `SelectionNotify` event
+            unsafe {
+                dnd.convert_selection(window, time, new_type);
+            }
+        }
 
-                type_
-            })
-            .as_reader(deadlock_sentinel);
-
-        let Some(state) = dnd.state.as_mut() else {
-            return Err(RequestError::Ignored);
-        };
-
-        state.pending_fetch_types = new_state;
-
-        Ok(Box::new(reader))
+        Ok(serial)
     }
 
     fn set_actions(&self, id: DataTransferId, actions: &[DndAction]) -> Result<(), RequestError> {

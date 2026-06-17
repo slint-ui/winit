@@ -8,9 +8,11 @@ use image::{imageops::FilterType, DynamicImage, GenericImageView, RgbImage};
 use softbuffer::{Context, Surface};
 use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
-use winit::data_transfer::{DataTransferId, DataTransferSendBuilder, TypeHint, TypedData};
+use winit::data_transfer::{DataTransferId, DataTransferSendBuilder, TypeHint};
 use winit::event::{ButtonSource, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, DndAction, DragIcon, EventLoop, OwnedDisplayHandle};
+use winit::event_loop::{
+    ActiveEventLoop, AsyncRequestSerial, DndAction, DragIcon, EventLoop, OwnedDisplayHandle,
+};
 use winit::icon::{Icon, RgbaIcon};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -28,16 +30,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(event_loop.run_app(app)?)
 }
 
-struct DndFetch {
-    data: Box<dyn TypedData>,
-    bytes: Vec<u8>,
-}
-
 /// Application state and event handling.
 #[derive(Debug)]
 struct Application {
     surface: Option<Surface<OwnedDisplayHandle, Box<dyn Window>>>,
-    last_dnd_fetch: Option<Box<dyn TypedData>>,
+    last_dnd_fetch: Option<AsyncRequestSerial>,
     last_drag_start: Option<DataTransferId>,
     drag_icon: (Icon, PhysicalPosition<i32>),
     drag_image_data: Arc<RgbImage>,
@@ -150,28 +147,24 @@ impl ApplicationHandler for Application {
                 info!("{event:?}");
                 self.last_dnd_fetch = None;
             },
-            WindowEvent::DragDataReceived { .. } => {
-                info!("{event:?}");
+            WindowEvent::DataTransferReceived { ref value, serial, .. } => {
+                assert_eq!(self.last_dnd_fetch, Some(serial));
 
-                let Some(data) = &mut self.last_dnd_fetch else {
-                    return;
-                };
-
-                match data.type_().hint() {
+                match value.type_().hint() {
                     Some(TypeHint::Plaintext | TypeHint::Html) => {
-                        let Ok(text) = data.try_as_string() else {
+                        let Ok(text) = value.try_as_string() else {
                             return;
                         };
                         info!("{text:?}");
                     },
                     Some(TypeHint::UriList) => {
-                        let Ok(uris) = data.try_as_uris() else {
+                        let Ok(uris) = value.try_as_uris() else {
                             return;
                         };
                         info!("{uris:#?}");
                     },
                     Some(TypeHint::Image { extension_hint: ext }) => {
-                        let Ok(bytes) = data.try_as_bytes() else {
+                        let Ok(bytes) = value.try_as_bytes() else {
                             return;
                         };
                         let format = ext.and_then(image::ImageFormat::from_extension);
@@ -201,7 +194,9 @@ impl ApplicationHandler for Application {
             WindowEvent::DragPosition { .. } => {
                 info!("{event:?}");
             },
-            WindowEvent::DragDropped { .. } => {},
+            WindowEvent::DragDropped { .. } => {
+                info!("{event:?}");
+            },
             WindowEvent::DragEntered { id, .. } => {
                 info!("{event:?}");
 
@@ -239,16 +234,6 @@ impl ApplicationHandler for Application {
                 event_loop.set_actions(id, &[DndAction::Move, DndAction::Copy]).unwrap();
 
                 self.last_dnd_fetch = event_loop.fetch_data_transfer(id, &type_).ok();
-
-                match self.last_dnd_fetch.as_mut().unwrap().try_as_string() {
-                    Err(e) if e.kind() == std::io::ErrorKind::Deadlock => {
-                        warn!(
-                            "Immediately waiting for a fetched data transfer may deadlock on some \
-                             platforms!"
-                        );
-                    },
-                    _ => {},
-                }
             },
             WindowEvent::OutgoingDragEnded { .. } => {
                 info!("{event:?}");

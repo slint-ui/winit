@@ -1,25 +1,18 @@
-use std::cell::Cell;
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io;
-use std::marker::PhantomData;
 use std::os::raw::*;
 use std::str::Utf8Error;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use percent_encoding::percent_decode;
 use winit_core::data_transfer::{DataTransfer, DataTransferId, TransferType, TypeHint, TypedData};
+use winit_core::event_loop::AsyncRequestSerial;
 use x11rb::protocol::xproto::{self, ConnectionExt};
 
 use crate::atoms::AtomName::None as DndNone;
-use crate::atoms::{
-    ApplicationRtf, Atoms, AudioAac, AudioAiff, AudioFlac, AudioMpeg, AudioOgg, AudioVndWav,
-    AudioVndWave, AudioWav, AudioWave, AudioXWav, ImageBmp, ImageGif, ImageJpeg, ImagePjpeg,
-    ImagePng, ImageRaw, ImageSvg, ImageTiff, ImageWebp, ImageXIcon, SAVE_TARGETS, STRING, TARGETS,
-    TextHtml, TextHtmlCharsetUtf8, TextPlain, TextPlainCharsetUtf8, TextUriList, UTF8_STRING,
-    XdndActionPrivate, XdndFinished, XdndSelection, XdndStatus, XdndTypeList,
-};
-use crate::deadlock_sentinel::{DeadlockSentinel, DeadlockSentinelReader};
+use crate::atoms::*;
 use crate::event_loop::{CookieResultExt, X11Error};
 use crate::util;
 use crate::xdisplay::XConnection;
@@ -52,144 +45,15 @@ impl From<io::Error> for UriListParseError {
     }
 }
 
-#[derive(Debug, Default)]
-struct SharedDataInnerState {
-    data: OnceLock<Result<Box<[c_uchar]>, io::ErrorKind>>,
-}
-
-impl SharedDataInnerState {
-    fn has_data(&self) -> bool {
-        self.data.get().is_some()
-    }
-
-    fn try_data(&self) -> io::Result<&[u8]> {
-        self.data
-            .get()
-            .map(|data| data.as_ref().map(|data| &**data).map_err(|err| io::Error::from(*err)))
-            .ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))?
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct SharedDataReader {
-    reader: Arc<SharedDataInnerState>,
-    deadlock_sentinel: DeadlockSentinelReader,
-}
-
-impl SharedDataReader {
-    fn try_data(&self) -> io::Result<&[u8]> {
-        self.wait_for_data()?;
-        self.reader.try_data()
-    }
-
-    fn wait_for_data(&self) -> io::Result<()> {
-        if self.reader.has_data() {
-            return Ok(());
-        } else if self.deadlock_sentinel.get() == Some(std::thread::current().id()) {
-            Err(io::ErrorKind::Deadlock.into())
-        } else {
-            Err(io::ErrorKind::WouldBlock.into())
-        }
-    }
-}
-
-type NonSyncMarker = PhantomData<Cell<()>>;
-
-#[derive(Debug, Default)]
-pub(crate) struct SharedDataWriter {
-    writer: Arc<SharedDataInnerState>,
-    _non_sync: NonSyncMarker,
-}
-
-impl SharedDataWriter {
-    fn reader(&self, deadlock_sentinel: DeadlockSentinelReader) -> SharedDataReader {
-        SharedDataReader { reader: self.writer.clone(), deadlock_sentinel }
-    }
-
-    pub(crate) fn write(&self, value: Box<[c_uchar]>) -> Result<(), Box<[c_uchar]>> {
-        // We know that we just passed `Ok`, so we can unwrap here.
-        self.writer.data.set(Ok(value)).map_err(|result| result.unwrap())
-    }
-}
-
-impl Drop for SharedDataWriter {
-    fn drop(&mut self) {
-        // Prevent `SelectionReader::wait_for_data` from deadlocking.
-        let _ = self.writer.data.set(Err(io::ErrorKind::BrokenPipe));
-    }
-}
-
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct SelectionReader {
     type_: SelectionType,
-    data: SharedDataReader,
-    pos: u64,
-}
-
-impl io::Read for SelectionReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.with_cursor(|cursor| cursor.read(buf))
-    }
-
-    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        self.with_cursor(|cursor| cursor.read_to_end(buf))
-    }
-
-    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
-        self.with_cursor(|cursor| cursor.read_to_string(buf))
-    }
-
-    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        self.with_cursor(|cursor| cursor.read_exact(buf))
-    }
-}
-
-impl io::BufRead for SelectionReader {
-    fn fill_buf(&mut self) -> io::Result<&[u8]> {
-        // `io::Cursor::split` takes `&self` instead of `self`, so we need to reimplement it here.
-        let data = self.data.try_data()?;
-
-        Ok(&data[self.pos.min(data.len() as u64) as usize..])
-    }
-
-    fn consume(&mut self, amount: usize) {
-        // `io::Cursor::consume` doesn't require a buffer, so we skip the `try_data` check implied
-        // by `with_cursor`.
-        self.pos += amount as u64;
-    }
-
-    fn read_line(&mut self, buf: &mut String) -> io::Result<usize> {
-        self.with_cursor(|cursor| cursor.read_line(buf))
-    }
-}
-
-impl SelectionReader {
-    pub(crate) fn new(type_: SelectionType, data: SharedDataReader) -> Self {
-        Self { type_, data, pos: 0 }
-    }
-
-    // Instead of reimplementing `io::Cursor`, we have a maximally-conservative
-    // implementation that just synchronizes state in order to prevent the chance
-    // of misimplementation.
-    fn with_cursor<F, O>(&mut self, func: F) -> io::Result<O>
-    where
-        F: FnOnce(&mut io::Cursor<&[u8]>) -> io::Result<O>,
-    {
-        let data = self.data.try_data()?;
-
-        let mut cursor = io::Cursor::new(data);
-        cursor.set_position(self.pos);
-        let result = func(&mut cursor)?;
-        let new_pos = cursor.position();
-        self.pos = new_pos;
-
-        Ok(result)
-    }
+    data: Vec<u8>,
 }
 
 impl TypedData for SelectionReader {
     fn try_read(&self) -> Option<Box<dyn io::BufRead>> {
-        Some(Box::new(self.clone()))
+        Some(Box::new(io::Cursor::new(self.data.clone())))
     }
 
     fn type_(&self) -> &dyn TransferType {
@@ -217,23 +81,19 @@ impl TypedData for SelectionReader {
 
         match self.type_.hint() {
             Some(TypeHint::Plaintext) | Some(TypeHint::Html) => {
-                let data = self.data.try_data()?;
-
                 // TODO: Is it correct to default to UTF-8?
                 let charset = self.type_.charset.unwrap_or(Charset::Utf8);
 
                 match charset {
-                    Charset::Utf16 => decode_utf16_bytes(data),
-                    Charset::Utf8 => std::str::from_utf8(data)
+                    Charset::Utf16 => decode_utf16_bytes(&self.data),
+                    Charset::Utf8 => std::str::from_utf8(&self.data)
                         .map(|str| str.to_owned())
                         .map_err(invalid_data)
-                        .or_else(|_| decode_utf16_bytes(data)),
+                        .or_else(|_| decode_utf16_bytes(&self.data)),
                 }
             },
             Some(TypeHint::UriList) => {
-                let data = self.data.try_data()?;
-
-                percent_decode(data).decode_utf8().map(Into::into).map_err(invalid_data)
+                percent_decode(&self.data).decode_utf8().map(Into::into).map_err(invalid_data)
             },
             _ => Err(io::ErrorKind::InvalidData.into()),
         }
@@ -254,27 +114,6 @@ impl TypedData for SelectionReader {
 }
 
 #[derive(Debug)]
-pub(crate) struct SelectionFetchState {
-    type_: SelectionType,
-    // Populated by SelectionNotify event handler
-    value: SharedDataWriter,
-}
-
-impl SelectionFetchState {
-    pub(crate) fn new(type_: SelectionType) -> Self {
-        Self { type_, value: Default::default() }
-    }
-
-    pub(crate) fn type_(&self) -> &SelectionType {
-        &self.type_
-    }
-
-    pub(crate) fn as_reader(&self, sentinel: DeadlockSentinelReader) -> SelectionReader {
-        SelectionReader::new(self.type_().clone(), self.value.reader(sentinel))
-    }
-}
-
-#[derive(Debug)]
 pub struct DragState {
     // Populated by XdndEnter event handler
     pub version: c_long,
@@ -285,7 +124,7 @@ pub struct DragState {
     // Populated by Xdnd* event handlers
     pub target_window: xproto::Window,
     // Populated by `fetch_data_transfer`
-    pub pending_fetch_types: Vec<SelectionType>,
+    pub pending_fetch_types: VecDeque<(AsyncRequestSerial, SelectionType)>,
     /// Whether the drag operation is accepted (or `None` if the user never indicated that it's
     /// accepted or rejected)
     // Populated by `Window::accept_drag`/`Window::reject_drag`.
@@ -311,7 +150,6 @@ impl Default for DragState {
 #[derive(Debug)]
 pub struct Dnd {
     xconn: Arc<XConnection>,
-    pub deadlock_sentinel: DeadlockSentinel,
     // If `None`, no drag operation is in progress.
     pub state: Option<DragState>,
 }
@@ -418,8 +256,8 @@ impl DataTransfer for Selection {
 }
 
 impl Dnd {
-    pub fn new(xconn: Arc<XConnection>, deadlock_sentinel: DeadlockSentinel) -> Self {
-        Dnd { xconn, state: None, deadlock_sentinel }
+    pub fn new(xconn: Arc<XConnection>) -> Self {
+        Dnd { xconn, state: None }
     }
 
     pub fn find_type_by_hint(&self, hint: TypeHint) -> Option<&SelectionType> {
@@ -458,7 +296,7 @@ impl Dnd {
             ));
         };
         let (accepted, action) =
-            if state.accepted { (1, atoms[XdndActionPrivate]) } else { (0, atoms[DndNone]) };
+            if state.accepted { (1, atoms[XdndActionCopy]) } else { (0, atoms[DndNone]) };
         self.xconn
             .send_client_msg(
                 target_window,
@@ -507,7 +345,7 @@ impl Dnd {
     ) -> Result<(), X11Error> {
         let atoms = self.xconn.atoms();
         let (accepted, action) = match status {
-            DndState::Accepted => (1, atoms[XdndActionPrivate]),
+            DndState::Accepted => (1, atoms[XdndActionCopy]),
             DndState::Rejected => (0, atoms[DndNone]),
         };
         self.xconn
@@ -522,19 +360,16 @@ impl Dnd {
 
         Ok(())
     }
-    pub unsafe fn read_data(&self, window: xproto::Window) -> Result<(), util::GetPropertyError> {
-        let state = self.state.as_ref().ok_or(util::GetPropertyError::Unknown)?;
 
-        // Never fetched
-        let last_fetch =
-            state.pending_fetch_types.as_ref().ok_or(util::GetPropertyError::Unknown)?;
-
+    pub fn read_data(
+        &self,
+        window: xproto::Window,
+        type_: SelectionType,
+    ) -> Result<SelectionReader, util::GetPropertyError> {
         let atoms = self.xconn.atoms();
-        let type_ = last_fetch.type_.atom();
-        let bytes = self.xconn.get_property(window, atoms[XdndSelection], type_)?;
+        let type_atom = type_.atom();
+        let bytes = self.xconn.get_property(window, atoms[XdndSelection], type_atom)?;
 
-        last_fetch.value.write(bytes.into()).map_err(|_| util::GetPropertyError::Unknown)?;
-
-        Ok(())
+        Ok(SelectionReader { type_, data: bytes })
     }
 }

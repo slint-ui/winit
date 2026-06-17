@@ -884,11 +884,8 @@ impl RootActiveEventLoop for ActiveEventLoop {
             surface.commit();
         }
 
-        let data_device_id = data_device.inner().id();
-
         state.dnd_state.set_send_drag(DragSource::new(
             transfer_id,
-            data_device_id,
             data_source,
             send_data,
             icon_surface,
