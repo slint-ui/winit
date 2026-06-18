@@ -73,8 +73,8 @@ use winit_core::event::{
 };
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndAction, DragIcon,
-    EventLoopProxy as RootEventLoopProxy, EventLoopProxyProvider,
+    ActiveEventLoop as RootActiveEventLoop, AsyncRequestSerial, ControlFlow, DeviceEvents,
+    DndAction, DragIcon, EventLoopProxy as RootEventLoopProxy, EventLoopProxyProvider,
     OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
 use winit_core::keyboard::ModifiersState;
@@ -487,21 +487,31 @@ impl RootActiveEventLoop for ActiveEventLoop {
         &self,
         id: DataTransferId,
         type_: &dyn TransferType,
-    ) -> Result<Box<dyn TypedData>, RequestError> {
-        let Some(data) = self.0.data_transfer(id) else {
+    ) -> Result<AsyncRequestSerial, RequestError> {
+        let Some(state) = self.0.drag_state(id) else {
             return Err(os_error!(UnknownDataTransfer(id)).into());
         };
         let hint = type_.hint().ok_or(RequestError::Ignored)?;
+        let typed_data = WinTypedData::new(state.data.clone(), hint)
+            .map(|value| Arc::new(value) as Arc<dyn TypedData>)
+            .ok_or(RequestError::Ignored)?;
 
-        WinTypedData::new(data, hint).map(|value| Box::new(value) as _).ok_or(RequestError::Ignored)
+        let serial = AsyncRequestSerial::get();
+
+        self.0.send_event(Event::Window {
+            window_id: state.window_id,
+            event: WindowEvent::DataTransferReceived { id, serial, value: typed_data },
+        });
+
+        Ok(serial)
     }
 
     fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {
-        let Some(data) = self.0.data_transfer(id) else {
+        let Some(state) = self.0.drag_state(id) else {
             return Err(os_error!(UnknownDataTransfer(id)).into());
         };
 
-        Ok(Box::new(WinDataTransfer::new(data)))
+        Ok(Box::new(WinDataTransfer::new(state.data.clone())))
     }
 
     fn set_actions(&self, id: DataTransferId, actions: &[DndAction]) -> Result<(), RequestError> {

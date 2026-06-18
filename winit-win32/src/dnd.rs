@@ -7,6 +7,7 @@ use std::ops::{BitOr, ControlFlow};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::ptr::NonNull;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{self, AtomicI64, AtomicUsize, Ordering};
 
 use dpi::PhysicalPosition;
@@ -38,6 +39,7 @@ use winit_core::data_transfer::{
 };
 use winit_core::event::WindowEvent;
 use winit_core::event_loop::DndAction;
+use winit_core::window::WindowId;
 
 use crate::definitions::{
     IDataObject, IDataObjectVtbl, IDropSource, IDropSourceVtbl, IDropTarget, IDropTargetHelper,
@@ -197,11 +199,11 @@ unsafe fn read_png(data_obj: *const IDataObject) -> Option<Vec<u8>> {
 
 #[derive(Debug)]
 pub(crate) struct WinDataTransfer {
-    data: Rc<DataObject>,
+    data: Arc<DataObject>,
 }
 
 impl WinDataTransfer {
-    pub(crate) fn new(data: Rc<DataObject>) -> Self {
+    pub(crate) fn new(data: Arc<DataObject>) -> Self {
         Self { data }
     }
 }
@@ -222,11 +224,11 @@ impl DataTransfer for WinDataTransfer {
 #[derive(Debug)]
 pub(crate) struct WinTypedData {
     type_: TypeHint,
-    data: Rc<DataObject>,
+    data: Arc<DataObject>,
 }
 
 impl WinTypedData {
-    pub(crate) fn new(data: Rc<DataObject>, requested: TypeHint) -> Option<Self> {
+    pub(crate) fn new(data: Arc<DataObject>, requested: TypeHint) -> Option<Self> {
         let type_ = data.resolve(requested)?;
         Some(Self { type_, data })
     }
@@ -237,7 +239,7 @@ impl TypedData for WinTypedData {
         &self.type_
     }
 
-    fn try_read(&mut self) -> Option<Box<dyn io::BufRead>> {
+    fn try_read(&self) -> Option<Box<dyn io::BufRead>> {
         match self.data.data.get(&self.type_)? {
             DataKind::Bytes(bytes) => Some(Box::new(io::Cursor::new(bytes.clone()))),
             DataKind::String(string) => {
@@ -248,14 +250,14 @@ impl TypedData for WinTypedData {
         }
     }
 
-    fn try_as_uris(&mut self) -> io::Result<Vec<OsString>> {
+    fn try_as_uris(&self) -> io::Result<Vec<OsString>> {
         match self.data.data.get(&self.type_) {
             Some(DataKind::Uris(uris)) => Ok(uris.clone()),
             _ => Err(io::ErrorKind::InvalidData.into()),
         }
     }
 
-    fn try_as_string(&mut self) -> io::Result<String> {
+    fn try_as_string(&self) -> io::Result<String> {
         match self.data.data.get(&self.type_) {
             Some(DataKind::String(string)) => Ok(string.clone()),
             _ => Err(io::ErrorKind::InvalidData.into()),
@@ -404,8 +406,10 @@ impl FileDropHandler {
             .map_or_else(next_data_transfer_id, |info| info.id);
         drop_handler.active_data_transfer_id = Some(data_transfer_id);
 
-        let data = Rc::new(unsafe { DataObject::from_idataobject(pDataObj) });
-        drop_handler.runner.register_data_transfer(data_transfer_id, data);
+        let wid = WindowId::from_raw(drop_handler.window.addr());
+
+        let data = Arc::new(unsafe { DataObject::from_idataobject(pDataObj) });
+        drop_handler.runner.register_data_transfer(data_transfer_id, wid, data);
 
         let pt_screen = POINT { x: pt.x, y: pt.y };
         let mut pt_client = pt_screen;
@@ -463,7 +467,7 @@ impl FileDropHandler {
             return E_ABORT;
         };
 
-        let source_allowed = unsafe { pdwEffect.read() };
+        let effects = unsafe { pdwEffect.read() };
 
         let pt_screen = POINT { x: pt.x, y: pt.y };
         let mut pt_client = pt_screen;
@@ -471,12 +475,19 @@ impl FileDropHandler {
             ScreenToClient(drop_handler.window, &mut pt_client);
         }
         let position = PhysicalPosition::new(pt_client.x as f64, pt_client.y as f64);
-        (drop_handler.send_event)(WindowEvent::DragPosition { id: data_transfer_id, position });
+
+        let proposed_action = drop_handler.runner.proposed_dnd_action(data_transfer_id, effects);
+
+        (drop_handler.send_event)(WindowEvent::DragPosition {
+            id: data_transfer_id,
+            position,
+            proposed_action,
+        });
 
         // Get actions after the event handler has run, so that we update it based on the user's
         // supplied info.
         let actions = drop_handler.runner.current_drag_actions(data_transfer_id);
-        let new_effect = pick_effect(&actions, grfKeyState, source_allowed);
+        let new_effect = pick_effect(&actions, grfKeyState, effects);
         unsafe {
             pdwEffect.write(new_effect);
         }
@@ -523,19 +534,7 @@ impl FileDropHandler {
         };
 
         let effects = unsafe { pdwEffect.read() };
-        let proposed_action =
-            drop_handler.runner.current_drag_actions(data_transfer_id).iter().copied().find(
-                |action| {
-                    let effect = match action {
-                        DndAction::Move => DROPEFFECT_MOVE,
-                        DndAction::Copy => DROPEFFECT_COPY,
-                        DndAction::Link => DROPEFFECT_LINK,
-                        _ => return false,
-                    };
-
-                    (effects | effect) != 0
-                },
-            );
+        let proposed_action = drop_handler.runner.proposed_dnd_action(data_transfer_id, effects);
 
         let pt_screen = POINT { x: pt.x, y: pt.y };
         let mut pt_client = pt_screen;
@@ -545,12 +544,17 @@ impl FileDropHandler {
         let pt = pt_client;
         let position = PhysicalPosition::new(pt.x as f64, pt.y as f64);
 
-        (drop_handler.send_event)(WindowEvent::DragPosition { id: data_transfer_id, position });
+        (drop_handler.send_event)(WindowEvent::DragPosition {
+            id: data_transfer_id,
+            position,
+            proposed_action,
+        });
 
         // Get actions after the event handler has run, so that we update it based on the user's
         // supplied info.
         let actions = drop_handler.runner.current_drag_actions(data_transfer_id);
-        let source_allowed = unsafe { *pdwEffect };
+        let source_allowed = unsafe { pdwEffect.read() };
+        let proposed_action = drop_handler.runner.proposed_dnd_action(data_transfer_id, effects);
 
         // Negotiate the effect first so we can pick the right outgoing event. If the app
         // rejected the drop (e.g. via `set_valid_actions(none())`), `pick_effect` returns

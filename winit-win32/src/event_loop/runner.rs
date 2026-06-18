@@ -29,7 +29,8 @@ type EventHandler = Cell<Option<&'static mut (dyn ApplicationHandler + 'static)>
 #[derive(Debug)]
 pub(super) struct DragState {
     pub(super) id: DataTransferId,
-    data: Rc<DataObject>,
+    pub(super) window_id: WindowId,
+    pub(super) data: Arc<DataObject>,
     pub(super) actions: Vec<DndAction>,
 }
 
@@ -204,9 +205,15 @@ impl EventLoopRunner {
         self.pending_source_drag_cleanup.set(Some(id));
     }
 
-    pub(crate) fn register_data_transfer(&self, id: DataTransferId, data: Rc<DataObject>) {
+    pub(crate) fn register_data_transfer(
+        &self,
+        id: DataTransferId,
+        window_id: WindowId,
+        data: Arc<DataObject>,
+    ) {
         // By default, no actions have been set as valid by the target.
-        *self.drag_state.borrow_mut() = Some(DragState { id, data, actions: Default::default() });
+        *self.drag_state.borrow_mut() =
+            Some(DragState { id, window_id, data, actions: Default::default() });
     }
 
     pub(crate) fn remove_data_transfer(&self, id: DataTransferId) {
@@ -216,14 +223,31 @@ impl EventLoopRunner {
         }
     }
 
-    pub(crate) fn data_transfer(&self, id: DataTransferId) -> Option<Rc<DataObject>> {
-        let state = self.drag_state.borrow();
-        state.as_ref().filter(|s| s.id == id).map(|s| s.data.clone())
+    pub(super) fn drag_state(&self, id: DataTransferId) -> Option<Ref<'_, DragState>> {
+        Ref::filter_map(self.drag_state.borrow(), |state| state.as_ref().filter(|s| s.id == id))
+            .ok()
     }
 
     pub(crate) fn current_drag_actions(&self, id: DataTransferId) -> Ref<'_, [DndAction]> {
         Ref::map(self.drag_state.borrow(), |state| {
             state.as_ref().filter(|s| s.id == id).map(|s| &s.actions[..]).unwrap_or_default()
+        })
+    }
+
+    pub(crate) fn proposed_dnd_action(
+        &self,
+        id: DataTransferId,
+        effects: DropEffect,
+    ) -> Option<DndAction> {
+        self.current_drag_actions(id).iter().copied().find(|action| {
+            let effect = match action {
+                DndAction::Move => DROPEFFECT_MOVE,
+                DndAction::Copy => DROPEFFECT_COPY,
+                DndAction::Link => DROPEFFECT_LINK,
+                _ => return false,
+            };
+
+            (effects | effect) != 0
         })
     }
 
