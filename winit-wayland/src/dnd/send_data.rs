@@ -1,8 +1,6 @@
-use std::{
-    ffi::OsString,
-    io::{BufRead, Cursor, Read, Write},
-    mem,
-};
+use std::ffi::OsString;
+use std::io::{BufRead, Cursor, Read, Write};
+use std::mem;
 
 #[derive(Default, Debug)]
 pub struct UriListEncoder {

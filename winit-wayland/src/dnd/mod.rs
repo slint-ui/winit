@@ -6,7 +6,6 @@ mod send_data;
 
 use std::ffi::OsString;
 use std::fmt;
-
 use std::io::{self, BufRead, Cursor, ErrorKind};
 use std::ops::{BitOr, Deref};
 use std::os::unix::ffi::OsStringExt;

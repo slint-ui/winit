@@ -737,7 +737,8 @@ impl RootActiveEventLoop for ActiveEventLoop {
                     WindowEvent::DataTransferReceived {
                         id,
                         serial: async_request_serial,
-                        // `unwrap` is safe here, as we always return `PostAction::Remove` in this branch.
+                        // `unwrap` is safe here, as we always return `PostAction::Remove` in this
+                        // branch.
                         value: Arc::new(MimeData::new(mime_type.take().unwrap(), result)),
                     },
                     window_id,

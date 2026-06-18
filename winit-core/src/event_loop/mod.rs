@@ -193,10 +193,11 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
     ///
     /// A `DataTransferId` that can be used to identify this drag operation when events are received
     /// such as `OutgoingDragEnded`. Note that if a drag-and-drop operation starts and ends from the
-    /// same window or process, the transfer ID that is reported by `DragEntered` is _not_ guaranteed
-    /// to be the same as the one returned by this method. On most platforms, it should be safe to make the
-    /// assumption that if an outgoing drag is still in progress, then any incoming drag is the same
-    /// operation. However, that assumption is not encoded in winit to avoid misleading users.
+    /// same window or process, the transfer ID that is reported by `DragEntered` is _not_
+    /// guaranteed to be the same as the one returned by this method. On most platforms, it
+    /// should be safe to make the assumption that if an outgoing drag is still in progress,
+    /// then any incoming drag is the same operation. However, that assumption is not encoded in
+    /// winit to avoid misleading users.
     fn start_drag(
         &self,
         source: WindowId,

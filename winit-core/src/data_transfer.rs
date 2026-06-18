@@ -180,13 +180,15 @@ pub trait TypedData: AsAny + fmt::Debug + Send + Sync {
     ///
     /// On some platforms, the reader must be driven incrementally upon each
     /// [`WindowEvent::DragDataReceived`](crate::event::WindowEvent::DragDataReceived)`. If you
-    /// don't need to stream the data and just want the bytes in a single buffer, use [`TypedData::try_as_bytes`].
+    /// don't need to stream the data and just want the bytes in a single buffer, use
+    /// [`TypedData::try_as_bytes`].
     fn try_read(&self) -> Option<Box<dyn io::BufRead>>;
 
     /// If this value is readable as bytes, return those bytes.
     ///
     /// If this returns [`WouldBlock`](std::io::ErrorKind::WouldBlock), then it should be called
-    /// again upon next receiving [`WindowEvent::DragDataReceived`](crate::event::WindowEvent::DragDataReceived)
+    /// again upon next receiving
+    /// [`WindowEvent::DragDataReceived`](crate::event::WindowEvent::DragDataReceived)
     fn try_as_bytes(&self) -> io::Result<Vec<u8>> {
         let mut reader = self
             .try_read()
@@ -207,7 +209,8 @@ pub trait TypedData: AsAny + fmt::Debug + Send + Sync {
     /// to ensure that the URIs are valid or in the format
     ///
     /// If this returns [`WouldBlock`](std::io::ErrorKind::WouldBlock), then it should be called
-    /// again upon next receiving [`WindowEvent::DragDataReceived`](crate::event::WindowEvent::DragDataReceived)
+    /// again upon next receiving
+    /// [`WindowEvent::DragDataReceived`](crate::event::WindowEvent::DragDataReceived)
     fn try_as_uris(&self) -> io::Result<Vec<OsString>>;
 
     /// Read this value as a plain text string.
@@ -215,11 +218,13 @@ pub trait TypedData: AsAny + fmt::Debug + Send + Sync {
     /// If this value is not readable as a string, return `None`.
     ///
     /// If this returns [`WouldBlock`](std::io::ErrorKind::WouldBlock), then it should be called
-    /// again upon next receiving [`WindowEvent::DragDataReceived`](crate::event::WindowEvent::DragDataReceived)
+    /// again upon next receiving
+    /// [`WindowEvent::DragDataReceived`](crate::event::WindowEvent::DragDataReceived)
     fn try_as_string(&self) -> io::Result<String>;
 }
 
-// Required for `WindowEvent` to implement `PartialEq` - we just implement this on a best-effort basis.
+// Required for `WindowEvent` to implement `PartialEq` - we just implement this on a best-effort
+// basis.
 impl PartialEq for dyn TypedData {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::addr_eq(self, other)

@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dpi::PhysicalPosition;
-use image::{imageops::FilterType, DynamicImage, GenericImageView, RgbImage};
+use image::imageops::FilterType;
+use image::{DynamicImage, GenericImageView, RgbImage};
 use softbuffer::{Context, Surface};
 use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
