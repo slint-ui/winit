@@ -8,7 +8,9 @@ use std::time::Instant;
 use dispatch2::MainThreadBound;
 use objc2::MainThreadMarker;
 use objc2::rc::{Retained, Weak};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSRunningApplication};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSDragOperation, NSRunningApplication,
+};
 use objc2_foundation::NSNotification;
 use winit_common::core_foundation::{EventLoopProxy, MainRunLoop};
 use winit_common::event_handler::EventHandler;
@@ -409,6 +411,15 @@ impl AppState {
 
     pub fn drag_state(&self) -> &RefCell<Option<DragState>> {
         &self.drag_state
+    }
+
+    pub(crate) fn proposed_drag_action(
+        &self,
+        source_operations: NSDragOperation,
+    ) -> Option<DndAction> {
+        self.drag_state().borrow().as_ref().and_then(|drag_state| {
+            crate::dnd::preferred_drag_operation(source_operations, &drag_state.valid_actions)
+        })
     }
 }
 

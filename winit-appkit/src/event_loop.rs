@@ -22,13 +22,15 @@ use winit_common::foundation::create_observer;
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{CustomCursor as CoreCustomCursor, CustomCursorSource};
 use winit_core::data_transfer::{
-    DataTransfer, DataTransferId, DataTransferSend, SendData, TransferType, TypeHint, TypedData,
+    DataTransfer, DataTransferId, DataTransferSend, SendData, TransferType, TypeHint,
 };
 use winit_core::error::{EventLoopError, RequestError};
+use winit_core::event::WindowEvent;
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::{
-    ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, DndAction, DragIcon,
-    EventLoopProxy as CoreEventLoopProxy, OwnedDisplayHandle as CoreOwnedDisplayHandle,
+    ActiveEventLoop as RootActiveEventLoop, AsyncRequestSerial, ControlFlow, DeviceEvents,
+    DndAction, DragIcon, EventLoopProxy as CoreEventLoopProxy,
+    OwnedDisplayHandle as CoreOwnedDisplayHandle,
 };
 use winit_core::monitor::MonitorHandle as CoreMonitorHandle;
 use winit_core::window::{Theme, WindowId};
@@ -40,7 +42,7 @@ use super::event::dummy_event;
 use super::monitor;
 use crate::ActivationPolicy;
 use crate::cursor::image_from_icon;
-use crate::dnd::{PasteboardWriter, dnd_actions_to_ns_drag_operation};
+use crate::dnd::{PasteboardTypeSpec, PasteboardWriter, dnd_actions_to_ns_drag_operation};
 use crate::window::Window;
 
 #[derive(Debug)]
@@ -140,12 +142,28 @@ impl RootActiveEventLoop for ActiveEventLoop {
         &self,
         id: DataTransferId,
         type_: &dyn TransferType,
-    ) -> Result<Box<dyn TypedData>, RequestError> {
+    ) -> Result<AsyncRequestSerial, RequestError> {
         let Some(pb) = self.app_state.pasteboards().get(id) else {
             return Err(RequestError::Ignored);
         };
 
-        pb.with_type(type_).map(|value| Box::new(value) as _).ok_or(RequestError::Ignored)
+        let serial = AsyncRequestSerial::get();
+
+        let Some(type_) = PasteboardTypeSpec::from_dyn(type_) else {
+            return Err(os_error!(format!("Pasteboard does not contain type {type_:?}")).into());
+        };
+
+        let data = Arc::new(pb.with_type(type_));
+
+        self.app_state.maybe_queue_with_handler(move |app, event_loop| {
+            app.window_event(
+                event_loop,
+                WindowId::from_raw(0),
+                WindowEvent::DataTransferReceived { id, serial, value: data },
+            );
+        });
+
+        Ok(serial)
     }
 
     fn data_transfer(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, RequestError> {

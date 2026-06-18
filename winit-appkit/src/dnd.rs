@@ -1,13 +1,14 @@
-use std::cell::{OnceCell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
-use std::ops::{BitOr, ControlFlow, Deref};
-use std::rc::Rc;
+use std::ops::{BitOr, ControlFlow};
+use std::sync::{Arc, OnceLock};
 
+use dispatch2::MainThreadBound;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
-use objc2::{AnyThread, DefinedClass as _, Message, define_class, msg_send};
+use objc2::{AnyThread, DefinedClass as _, MainThreadMarker, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSDragOperation, NSPasteboard, NSPasteboardType, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
     NSPasteboardTypePNG, NSPasteboardTypeSound, NSPasteboardTypeString, NSPasteboardTypeTIFF,
@@ -24,7 +25,7 @@ use winit_core::event_loop::DndAction;
 pub struct PasteboardType {
     hint: Option<TypeHint>,
     // We need to convert `NSString` to `str` since `NSString` isn't `Send`/`Sync`
-    inner: Retained<NSPasteboardType>,
+    inner: Arc<str>,
 }
 
 impl PasteboardType {
@@ -41,16 +42,9 @@ impl PasteboardType {
         };
 
         hint_to_pasteboard_type.into_iter().find_map(|(haystack, inner)| {
-            (haystack.matches(&hint)).then(|| Self { hint: Some(hint), inner: inner.retain() })
+            (haystack.matches(&hint))
+                .then(|| Self { hint: Some(hint), inner: inner.to_string().into() })
         })
-    }
-}
-
-impl Deref for PasteboardType {
-    type Target = Retained<NSPasteboardType>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
     }
 }
 
@@ -75,7 +69,7 @@ impl From<Retained<NSPasteboardType>> for PasteboardType {
             .iter()
             .find_map(|(pb_type, hint)| (**pb_type == *value).then_some(hint));
 
-        Self { hint: hint.copied(), inner: value }
+        Self { hint: hint.copied(), inner: value.to_string().into() }
     }
 }
 
@@ -95,34 +89,40 @@ impl TransferType for PasteboardType {
 }
 
 /// A thin wrapper around [`NSPasteboard`], implementing [`DataTransfer`].
-#[derive(Clone, Debug)]
-pub struct Pasteboard<PB = Retained<NSPasteboard>> {
+#[derive(Debug)]
+pub struct Pasteboard {
     transfer_id: DataTransferId,
-    inner: PB,
-    types: OnceCell<Rc<[PasteboardType]>>,
+    ns_pasteboard: MainThreadBound<Retained<NSPasteboard>>,
+    types: OnceLock<Arc<[PasteboardType]>>,
 }
 
-impl Deref for Pasteboard {
-    type Target = Retained<NSPasteboard>;
+impl Clone for Pasteboard {
+    fn clone(&self) -> Self {
+        let inner = self.ns_pasteboard.get_on_main(|inner| {
+            MainThreadBound::new(inner.clone(), MainThreadMarker::new().unwrap())
+        });
 
-    fn deref(&self) -> &Self::Target {
-        &self.inner
+        Self { transfer_id: self.transfer_id, ns_pasteboard: inner, types: self.types.clone() }
     }
 }
 
 impl Pasteboard {
-    fn new(transfer_id: DataTransferId, pasteboard: Retained<NSPasteboard>) -> Self {
-        Self { transfer_id, inner: pasteboard, types: Default::default() }
+    fn new(
+        transfer_id: DataTransferId,
+        ns_pasteboard: MainThreadBound<Retained<NSPasteboard>>,
+    ) -> Self {
+        Self { transfer_id, ns_pasteboard, types: Default::default() }
     }
 
     /// Get the array of [`PasteboardType`]s advertized by this [`Pasteboard`].
     pub fn types(&self) -> &[PasteboardType] {
         self.types.get_or_init(|| {
-            self.inner
-                .types()
-                .map(|types| types.into_iter().map(PasteboardType::from).collect::<Vec<_>>())
-                .unwrap_or_default()
-                .into()
+            self.ns_pasteboard.get_on_main(|pb| {
+                pb.types()
+                    .map(|types| types.into_iter().map(PasteboardType::from).collect::<Vec<_>>())
+                    .unwrap_or_default()
+                    .into()
+            })
         })
     }
 
@@ -134,15 +134,8 @@ impl Pasteboard {
     /// Get a typed reader for this pasteboard. This is only necessary in the cross-platform case,
     /// as a user downcasting to the platform-specific type can just access the `NSPasteboard`
     /// directly.
-    pub(crate) fn with_type(&self, dyn_type: &dyn TransferType) -> Option<PasteboardValue> {
-        if self.has_type(dyn_type) {
-            Some(PasteboardValue {
-                type_: PasteboardTypeSpec::from_dyn(dyn_type)?,
-                inner: self.clone(),
-            })
-        } else {
-            None
-        }
+    pub(crate) fn with_type(&self, type_: PasteboardTypeSpec) -> PasteboardValue {
+        PasteboardValue { type_, pasteboard: self.clone() }
     }
 }
 
@@ -156,13 +149,13 @@ impl DataTransfer for Pasteboard {
 }
 
 #[derive(Debug, Clone)]
-enum PasteboardTypeSpec {
+pub(crate) enum PasteboardTypeSpec {
     PasteboardType(PasteboardType),
     TypeHint(TypeHint),
 }
 
 impl PasteboardTypeSpec {
-    fn from_dyn(type_: &dyn TransferType) -> Option<Self> {
+    pub(crate) fn from_dyn(type_: &dyn TransferType) -> Option<Self> {
         match type_.cast_ref::<PasteboardType>() {
             Some(pb_type) => Some(Self::PasteboardType(pb_type.clone())),
             None => type_.hint().map(Into::into),
@@ -236,150 +229,139 @@ pub struct PasteboardValue {
     // the use of `pasteboardItems`, so we allow using `TypeHint` instead to preserve the user's
     // intention.
     type_: PasteboardTypeSpec,
-    inner: Pasteboard,
-}
-
-impl PasteboardValue {
-    fn single_file_url(&self) -> Option<String> {
-        self.inner
-            .stringForType(unsafe { NSPasteboardTypeFileURL })
-            .map(|ns_str| ns_str.to_string())
-    }
-}
-
-impl Deref for PasteboardValue {
-    type Target = Retained<NSPasteboard>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
+    pasteboard: Pasteboard,
 }
 
 impl TypedData for PasteboardValue {
     fn type_(&self) -> &dyn TransferType {
         match &self.type_ {
-            PasteboardTypeSpec::PasteboardType(pasteboard_type) => pasteboard_type,
+            PasteboardTypeSpec::PasteboardType(pasteboard_type) => {
+                pasteboard_type as &dyn TransferType
+            },
             PasteboardTypeSpec::TypeHint(type_hint) => type_hint,
         }
     }
 
-    fn try_read(&mut self) -> Option<Box<dyn std::io::BufRead>> {
-        struct DataReader {
-            inner: Retained<NSData>,
-            offset: usize,
-        }
-
-        impl DataReader {
-            fn new(data: Retained<NSData>) -> Self {
-                Self { inner: data, offset: 0 }
-            }
-        }
-
-        impl io::Read for DataReader {
-            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-                let end = (self.offset + buf.len()).min(self.inner.len());
-                let range = self.offset..end;
-                self.offset = end;
-                let bytes = unsafe { self.inner.as_bytes_unchecked() };
-                let src = &bytes[range];
-                buf[..src.len()].copy_from_slice(src);
-
-                Ok(src.len())
-            }
-        }
-
-        impl io::BufRead for DataReader {
-            fn fill_buf(&mut self) -> io::Result<&[u8]> {
-                Ok(unsafe { self.inner.as_bytes_unchecked() }
-                    .get(self.offset..)
-                    .unwrap_or_default())
-            }
-
-            fn consume(&mut self, amount: usize) {
-                self.offset = (self.offset + amount).min(self.inner.len())
-            }
-        }
-
-        self.inner
-            .dataForType(self.type_.pasteboard_type()?)
-            .map(|data| Box::new(DataReader::new(data)) as _)
+    fn try_read(&self) -> Option<Box<dyn io::BufRead>> {
+        self.try_as_bytes()
+            .ok()
+            .map(|bytes| Box::new(io::Cursor::new(bytes)) as Box<dyn io::BufRead>)
     }
 
-    fn try_as_uris(&mut self) -> io::Result<Vec<OsString>> {
+    fn try_as_bytes(&self) -> io::Result<Vec<u8>> {
+        let type_ = self.type_.clone();
+        self.pasteboard
+            .ns_pasteboard
+            .get_on_main(|pasteboard| {
+                let bytes =
+                    pasteboard.dataForType(&NSString::from_str(&type_.pasteboard_type()?.inner))?;
+                Some(bytes.to_vec())
+            })
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "NSPasteboard doesn't advertise a binary representation for type {:?}",
+                    self.type_
+                ))
+            })
+    }
+
+    fn try_as_uris(&self) -> io::Result<Vec<OsString>> {
         // TODO: We should probably use `readObjects`, need to check how that works.
         if self.type_().hint() != Some(TypeHint::UriList) {
             return Err(io::ErrorKind::InvalidData.into());
         }
 
-        let Some(items) = self.inner.pasteboardItems() else {
-            // The pasteboard didn't expose any items, so we try with the deprecated method.
-            #[expect(deprecated)]
-            let property_list = match self
-                .inner
-                .propertyListForType(unsafe { objc2_app_kit::NSFilenamesPboardType })
-            {
-                Some(property_list) => property_list,
-                None => {
-                    return self
-                        .single_file_url()
-                        .map(|str| vec![str.into()])
-                        .ok_or_else(|| io::ErrorKind::InvalidData.into());
-                },
+        self.pasteboard.ns_pasteboard.get_on_main(|pasteboard| {
+            let Some(items) = pasteboard.pasteboardItems() else {
+                // The pasteboard didn't expose any items, so we try with the deprecated method.
+                #[expect(deprecated)]
+                let property_list = match pasteboard
+                    .propertyListForType(unsafe { objc2_app_kit::NSFilenamesPboardType })
+                {
+                    Some(property_list) => property_list,
+                    None => {
+                        return pasteboard
+                            .stringForType(unsafe { NSPasteboardTypeFileURL })
+                            .map(|ns_str| vec![ns_str.to_string().into()])
+                            .ok_or_else(|| io::ErrorKind::InvalidData.into());
+                    },
+                };
+
+                let paths = property_list
+                    .downcast::<NSArray>()
+                    .unwrap()
+                    .into_iter()
+                    .map(|file| file.downcast::<NSString>().unwrap().to_string().into())
+                    .collect();
+
+                return Ok(paths);
             };
 
-            let paths = property_list
-                .downcast::<NSArray>()
-                .unwrap()
+            Ok(items
                 .into_iter()
-                .map(|file| file.downcast::<NSString>().unwrap().to_string().into())
-                .collect();
-
-            return Ok(paths);
-        };
-
-        Ok(items
-            .into_iter()
-            .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
-            .map(|ns_str| ns_str.to_string().into())
-            .collect())
+                .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
+                .map(|ns_str| ns_str.to_string().into())
+                .collect())
+        })
     }
 
-    fn try_as_string(&mut self) -> io::Result<String> {
-        self.inner
-            .stringForType(self.type_.pasteboard_type().ok_or(io::ErrorKind::InvalidData)?)
-            .map(|ns_str| ns_str.to_string())
-            .ok_or_else(|| io::ErrorKind::InvalidData.into())
+    fn try_as_string(&self) -> io::Result<String> {
+        let type_ = self.type_.clone();
+
+        self.pasteboard.ns_pasteboard.get_on_main(|pasteboard| {
+            pasteboard
+                .stringForType(&NSString::from_str(
+                    &type_.pasteboard_type().ok_or(io::ErrorKind::InvalidData)?.inner,
+                ))
+                .map(|ns_str| ns_str.to_string())
+                .ok_or_else(|| io::ErrorKind::InvalidData.into())
+        })
     }
 }
 
 #[derive(Debug, Default)]
 pub struct Pasteboards {
-    inner: RefCell<HashMap<DataTransferId, Weak<NSPasteboard>>>,
+    inner: RefCell<HashMap<DataTransferId, MainThreadBound<Weak<NSPasteboard>>>>,
 }
 
 impl Pasteboards {
     pub fn remove_deloaded_pasteboards(&self) {
-        self.inner.borrow_mut().retain(|_, state| state.load().is_some());
+        self.inner
+            .borrow_mut()
+            .retain(|_, state| state.get_on_main(|state| state.load().is_some()));
     }
 
     /// If the data transfer exists, update the pasteboard it points to.
-    pub fn set_pasteboard(&self, id: DataTransferId, pb: &Retained<NSPasteboard>) {
+    pub fn set_pasteboard(&self, id: DataTransferId, pb: &MainThreadBound<Retained<NSPasteboard>>) {
         let mut inner = self.inner.borrow_mut();
         if let Some(state) = inner.get_mut(&id) {
-            *state = Weak::from_retained(pb);
+            *state = pb.get_on_main(|pb| {
+                MainThreadBound::new(Weak::from_retained(pb), MainThreadMarker::new().unwrap())
+            });
         }
     }
 
-    pub fn insert(&self, transfer_id: DataTransferId, pb: &Retained<NSPasteboard>) {
-        self.inner.borrow_mut().insert(transfer_id, Weak::from_retained(pb));
+    pub fn insert(
+        &self,
+        transfer_id: DataTransferId,
+        pb: &MainThreadBound<Retained<NSPasteboard>>,
+    ) {
+        self.inner.borrow_mut().insert(
+            transfer_id,
+            pb.get_on_main(|pb| {
+                MainThreadBound::new(Weak::from_retained(pb), MainThreadMarker::new().unwrap())
+            }),
+        );
     }
 
     pub fn get(&self, id: DataTransferId) -> Option<Pasteboard> {
-        self.inner
-            .borrow()
-            .get(&id)
-            .and_then(|state| state.load())
-            .map(|pb| Pasteboard::new(id, pb))
+        self.inner.borrow().get(&id).and_then(|state| {
+            state.get_on_main(|state| {
+                let pb = state.load()?;
+                let pb = MainThreadBound::new(pb, MainThreadMarker::new().unwrap());
+                Some(Pasteboard::new(id, pb))
+            })
+        })
     }
 }
 
@@ -407,7 +389,7 @@ impl PasteboardWriter {
                 return ControlFlow::Continue(());
             };
 
-            writable_types.push((**pb_type).clone());
+            writable_types.push(NSString::from_str(&pb_type.inner));
 
             ControlFlow::Continue(())
         });
@@ -483,8 +465,6 @@ define_class!(
         ) -> NSPasteboardWritingOptions {
             let _ = type_;
             let _ = pasteboard;
-            // TODO: Not necessarily ideal to always use `Promised`, but
-            // it's good enough for now.
             NSPasteboardWritingOptions::empty()
         }
 

@@ -6,6 +6,7 @@ use std::ptr;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use dispatch2::MainThreadBound;
 use dpi::{
     LogicalInsets, LogicalPosition, LogicalSize, PhysicalInsets, PhysicalPosition, PhysicalSize,
     Position, Size,
@@ -395,7 +396,9 @@ define_class!(
         fn dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
             let _entered = debug_span!("draggingEntered:").entered();
 
-            let pb = sender.draggingPasteboard();
+            let pb =
+                MainThreadBound::new(sender.draggingPasteboard(), MainThreadMarker::new().unwrap());
+
             let dl = sender.draggingLocation();
             let dl = self.view().convertPoint_fromView(dl, None);
             let position =
@@ -404,7 +407,6 @@ define_class!(
             let vars = self.ivars();
 
             let source_operations = sender.draggingSourceOperationMask();
-            // let operations = ns_drag_operation_to_dnd_actions(source_operations);
 
             let transfer_id = DataTransferId::from_raw(sender.draggingSequenceNumber() as i64);
             vars.app_state.pasteboards().insert(transfer_id, &pb);
@@ -450,10 +452,10 @@ define_class!(
                 return NSDragOperation::empty();
             };
 
-            let pb = sender.draggingPasteboard();
+            let pb =
+                MainThreadBound::new(sender.draggingPasteboard(), MainThreadMarker::new().unwrap());
 
             let source_operations = sender.draggingSourceOperationMask();
-            // let operations = ns_drag_operation_to_dnd_actions(source_operations);
 
             vars.app_state.pasteboards().set_pasteboard(transfer_id, &pb);
 
@@ -462,10 +464,12 @@ define_class!(
             let position =
                 LogicalPosition::<f64>::from((dl.x, dl.y)).to_physical(self.scale_factor());
 
+            let proposed_action = vars.app_state.proposed_drag_action(source_operations);
+
             self.queue_event(WindowEvent::DragPosition {
                 id: transfer_id,
                 position,
-                // operations: Some(operations),
+                proposed_action,
             });
 
             let drag_state = vars.app_state.drag_state().borrow();
@@ -499,7 +503,8 @@ define_class!(
                 return false.into();
             };
 
-            let pb = sender.draggingPasteboard();
+            let pb =
+                MainThreadBound::new(sender.draggingPasteboard(), MainThreadMarker::new().unwrap());
 
             let source_operations = sender.draggingSourceOperationMask();
             // let operations = ns_drag_operation_to_dnd_actions(source_operations);
@@ -511,12 +516,16 @@ define_class!(
             let position =
                 LogicalPosition::<f64>::from((dl.x, dl.y)).to_physical(self.scale_factor());
 
-            self.queue_event(WindowEvent::DragPosition { id: transfer_id, position });
+            let proposed_action = vars.app_state.proposed_drag_action(source_operations);
 
-            let proposed_action =
-                vars.app_state.drag_state().borrow().as_ref().and_then(|drag_state| {
-                    preferred_drag_operation(source_operations, &drag_state.valid_actions)
-                });
+            self.queue_event(WindowEvent::DragPosition {
+                id: transfer_id,
+                position,
+                proposed_action,
+            });
+
+            // Check again, in case the application updated
+            let proposed_action = vars.app_state.proposed_drag_action(source_operations);
 
             self.queue_event(WindowEvent::DragDropped { id: transfer_id, proposed_action });
 
@@ -550,7 +559,10 @@ define_class!(
             };
 
             if let Some(sender) = sender {
-                let pb = sender.draggingPasteboard();
+                let pb = MainThreadBound::new(
+                    sender.draggingPasteboard(),
+                    MainThreadMarker::new().unwrap(),
+                );
                 vars.app_state.pasteboards().set_pasteboard(transfer_id, &pb);
 
                 let dl = sender.draggingLocation();
@@ -558,10 +570,13 @@ define_class!(
                 let position =
                     LogicalPosition::<f64>::from((dl.x, dl.y)).to_physical(self.scale_factor());
 
+                let source_operations = sender.draggingSourceOperationMask();
+                let proposed_action = vars.app_state.proposed_drag_action(source_operations);
+
                 self.queue_event(WindowEvent::DragPosition {
                     id: transfer_id,
                     position,
-                    // operations: Some(operations),
+                    proposed_action,
                 });
             }
 
