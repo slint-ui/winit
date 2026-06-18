@@ -222,7 +222,7 @@ pub fn preferred_drag_operation(
         .copied()
 }
 
-/// A thin wrapper around [`NSPasteboard`], implementing [`TypedValue`].
+/// A thin wrapper around [`NSPasteboard`], implementing [`TypedData`].
 #[derive(Debug)]
 pub struct PasteboardValue {
     // The concept of "top-level" types for a pasteboard doesn't always make sense on macOS due to

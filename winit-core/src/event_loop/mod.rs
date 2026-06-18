@@ -171,9 +171,9 @@ pub trait ActiveEventLoop: AsAny + fmt::Debug {
 
     /// Initiate a new drag-and-drop operation.
     ///
-    /// See [`DataTransferSendBuilder`](crate::data_transfer::DataTransferSend) for how to create a
-    /// new cross-platform data transfer, or see the platform-specific implementation of
-    /// [`DataTransferSend`].
+    /// See [`DataTransferSendBuilder`](crate::data_transfer::DataTransferSendBuilder) for how to
+    /// create a new cross-platform data transfer, or see the platform-specific implementation
+    /// of [`DataTransferSend`].
     ///
     /// ### Arguments
     ///

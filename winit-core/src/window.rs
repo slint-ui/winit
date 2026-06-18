@@ -42,8 +42,7 @@ impl WindowId {
 
 impl fmt::Debug for WindowId {
     fn fmt(&self, fmtr: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let inner = self.0;
-        write!(fmtr, "{inner:?}")
+        write!(fmtr, "{:?}", self.0)
     }
 }
 

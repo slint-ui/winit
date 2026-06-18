@@ -797,6 +797,9 @@ impl RootActiveEventLoop for ActiveEventLoop {
         action_mask: &[DndAction],
         icon: Option<DragIcon>,
     ) -> Result<DataTransferId, RequestError> {
+        const NO_POINTER_CAP_ERROR_MSG: &str =
+            "Tried to initiate drag, but source window does not have the pointer capability";
+
         let mut state = self.state.borrow_mut();
         let dnd_actions = action_mask
             .iter()
@@ -810,33 +813,19 @@ impl RootActiveEventLoop for ActiveEventLoop {
             .ok_or(NotSupportedError::new("Tried to initiate drag, but data device not enabled"))?;
 
         let windows = state.windows.borrow();
-        let source_window_state = windows
-            .get(&source)
-            .ok_or(NotSupportedError::new(
-                "Tried to initiate drag, but source window ID was invalid",
-            ))?
-            .lock()
-            .unwrap();
-        let source_surface = source_window_state.window.wl_surface();
         let seat = source_window_state
             .focused_seats()
             .find_map(|seat_id| {
                 // HACK: How do we get the correct seat for pointers here?
                 state.seats.get(seat_id).filter(|seat| seat.data_device().is_some())
             })
-            .ok_or(NotSupportedError::new(
-                "Tried to initiate drag, but source window does not have the pointer capability",
-            ))?;
-        let data_device = seat.data_device().ok_or(NotSupportedError::new(
-            "Tried to initiate drag, but source window does not have the pointer capability",
-        ))?;
+            .ok_or(NotSupportedError::new(NO_POINTER_CAP_ERROR_MSG))?;
+        let data_device =
+            seat.data_device().ok_or(NotSupportedError::new(NO_POINTER_CAP_ERROR_MSG))?;
 
         let serial = seat
             .pointer_data()
-            .ok_or(NotSupportedError::new(
-                "Tried to initiate drag, but source window does not have the pointer capability",
-            ))?
-            // TODO: Seems like a footgun that this requires a pointer serial
+            .ok_or(NotSupportedError::new(NO_POINTER_CAP_ERROR_MSG))?
             .latest_button_serial();
 
         let mut mime_types = Vec::new();
@@ -871,7 +860,15 @@ impl RootActiveEventLoop for ActiveEventLoop {
             Some(surface)
         });
 
-        data_source.start_drag(data_device, source_surface, icon_surface.as_ref(), serial);
+        // Inner block to reduce scope of mutex lock
+        {
+            let source_window_mutex = windows
+                .get(&source)
+                .ok_or(os_error!("Tried to initiate drag, but source window ID was invalid"))?;
+            let source_window_state = source_window_mutex.lock().unwrap();
+            let source_surface = source_window_state.window.wl_surface();
+            data_source.start_drag(data_device, source_surface, icon_surface.as_ref(), serial);
+        }
 
         let transfer_id = make_data_transfer_id(data_device.inner().id(), serial);
 
