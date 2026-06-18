@@ -827,52 +827,52 @@ impl RootActiveEventLoop for ActiveEventLoop {
             dnd_actions,
         );
 
-        let mut pool = state.image_pool.lock().unwrap();
-        let icon_surface = icon.and_then(|icon| {
-            let rgba = icon.icon.cast_ref::<RgbaIcon>()?;
+        // New scope to ensure we drop the locks as soon as possible.
+        {
+            let mut pool = state.image_pool.lock().unwrap();
+            let icon_surface = icon.and_then(|icon| {
+                let rgba = icon.icon.cast_ref::<RgbaIcon>()?;
 
-            let width = rgba.width().try_into().ok()?;
-            let height = rgba.height().try_into().ok()?;
+                let width = rgba.width().try_into().ok()?;
+                let height = rgba.height().try_into().ok()?;
 
-            let buffer =
-                image_to_buffer(width, height, rgba.buffer(), Format::Argb8888, &mut pool).ok()?;
+                let buffer =
+                    image_to_buffer(width, height, rgba.buffer(), Format::Argb8888, &mut pool)
+                        .ok()?;
 
-            let surface = state.compositor_state.create_surface(&self.queue_handle);
-            buffer.attach_to(&surface).ok()?;
-            surface.offset(icon.offset.x, icon.offset.y);
+                let surface = state.compositor_state.create_surface(&self.queue_handle);
+                buffer.attach_to(&surface).ok()?;
+                surface.offset(icon.offset.x, icon.offset.y);
 
-            Some(surface)
-        });
+                Some(surface)
+            });
 
-        let source_window_mutex = windows
-            .get(&source)
-            .ok_or(os_error!("Tried to initiate drag, but source window ID was invalid"))?;
-        let source_window_state = source_window_mutex.lock().unwrap();
-        let source_surface = source_window_state.window.wl_surface();
+            let windows = state.windows.borrow();
+            let source_window_mutex = windows
+                .get(&source)
+                .ok_or(os_error!("Tried to initiate drag, but source window ID was invalid"))?;
+            let source_window_state = source_window_mutex.lock().unwrap();
+            let source_surface = source_window_state.window.wl_surface();
 
-        let windows = state.windows.borrow();
-        let seat = source_window_state
-            .focused_seats()
-            .find_map(|seat_id| {
-                // HACK: How do we get the correct seat for pointers here?
-                state.seats.get(seat_id).filter(|seat| seat.data_device().is_some())
-            })
-            .ok_or(NotSupportedError::new(NO_POINTER_CAP_ERROR_MSG))?;
-        let data_device =
-            seat.data_device().ok_or(NotSupportedError::new(NO_POINTER_CAP_ERROR_MSG))?;
+            let seat = source_window_state
+                .focused_seats()
+                .find_map(|seat_id| {
+                    // HACK: How do we get the correct seat for pointers here?
+                    state.seats.get(seat_id).filter(|seat| seat.data_device().is_some())
+                })
+                .ok_or(NotSupportedError::new(NO_POINTER_CAP_ERROR_MSG))?;
+            let data_device =
+                seat.data_device().ok_or(NotSupportedError::new(NO_POINTER_CAP_ERROR_MSG))?;
 
-        let serial = seat
-            .pointer_data()
-            .ok_or(NotSupportedError::new(NO_POINTER_CAP_ERROR_MSG))?
-            .latest_button_serial();
+            let serial = seat
+                .pointer_data()
+                .ok_or(NotSupportedError::new(NO_POINTER_CAP_ERROR_MSG))?
+                .latest_button_serial();
 
-        data_source.start_drag(data_device, source_surface, icon_surface.as_ref(), serial);
+            data_source.start_drag(data_device, source_surface, icon_surface.as_ref(), serial);
 
-        let transfer_id = make_data_transfer_id(data_device.inner().id(), serial);
-
-        std::mem::drop(pool);
-        std::mem::drop(source_window_state);
-        std::mem::drop(windows);
+            let transfer_id = make_data_transfer_id(data_device.inner().id(), serial);
+        }
 
         // For some reason, if we commit before starting the drag then the offset isn't applied.
         // This doesn't seem to be documented anywhere, and it's possible that it's a bug in KDE.
