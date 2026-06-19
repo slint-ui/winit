@@ -827,10 +827,9 @@ impl RootActiveEventLoop for ActiveEventLoop {
             dnd_actions,
         );
 
-        // New scope to ensure we drop the locks as soon as possible.
-        {
+        let icon_surface = {
             let mut pool = state.image_pool.lock().unwrap();
-            let icon_surface = icon.and_then(|icon| {
+            icon.and_then(|icon| {
                 let rgba = icon.icon.cast_ref::<RgbaIcon>()?;
 
                 let width = rgba.width().try_into().ok()?;
@@ -845,8 +844,11 @@ impl RootActiveEventLoop for ActiveEventLoop {
                 surface.offset(icon.offset.x, icon.offset.y);
 
                 Some(surface)
-            });
+            })
+        };
 
+        // New scope to ensure we drop the locks as soon as possible.
+        let transfer_id = {
             let windows = state.windows.borrow();
             let source_window_mutex = windows
                 .get(&source)
@@ -871,8 +873,8 @@ impl RootActiveEventLoop for ActiveEventLoop {
 
             data_source.start_drag(data_device, source_surface, icon_surface.as_ref(), serial);
 
-            let transfer_id = make_data_transfer_id(data_device.inner().id(), serial);
-        }
+            make_data_transfer_id(data_device.inner().id(), serial)
+        };
 
         // For some reason, if we commit before starting the drag then the offset isn't applied.
         // This doesn't seem to be documented anywhere, and it's possible that it's a bug in KDE.
