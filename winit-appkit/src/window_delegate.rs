@@ -900,7 +900,7 @@ impl WindowDelegate {
             .and_then(|attrs| attrs.cast::<WindowAttributesMacOS>().ok())
             .unwrap_or_default();
 
-        let is_popup = matches!(attrs.window_type(), WindowType::Popup);
+        let is_popup = matches!(attrs.window_type(), WindowType::Popup { .. });
         if is_popup {
             // A popup is an undecorated, non-activating panel with no titlebar buttons. Model it
             // as such so it flows through the existing borderless + panel paths in `new_window`
@@ -1238,6 +1238,17 @@ impl WindowDelegate {
         let parent_origin =
             flip_window_screen_coordinates(parent.contentRectForFrameRect(parent.frame()));
         LogicalPosition::new(position.x - parent_origin.x, position.y - parent_origin.y)
+    }
+
+    /// The parent window's content area origin, in global (Winit, top-left/y-down) screen
+    /// coordinates. `None` if this isn't a popup, or it has no parent.
+    pub fn parent_content_origin(&self) -> Option<LogicalPosition<f64>> {
+        if !self.ivars().is_popup.get() {
+            return None;
+        }
+        let parent = self.window().parentWindow()?;
+        let origin = flip_window_screen_coordinates(parent.contentRectForFrameRect(parent.frame()));
+        Some(LogicalPosition::new(origin.x, origin.y))
     }
 
     #[inline]

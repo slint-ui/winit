@@ -8,7 +8,7 @@
 
 use core::fmt;
 
-use dpi::{Position, Size};
+use dpi::{LogicalPosition, LogicalSize, Position, Size};
 
 use crate::as_any::AsAny;
 
@@ -89,4 +89,341 @@ pub trait Popup: AsAny + Send + Sync + fmt::Debug {
 
     /// Set the popup position relative to the anchor rect
     fn set_positioner_offset(&self, position: impl Into<Position>);
+}
+
+/// Returns, as fractions of the anchor rectangle's width/height, the point within that rectangle
+/// that the popup is anchored to (0.0 = left/top edge, 0.5 = center, 1.0 = right/bottom edge).
+/// Mirrors the Wayland `xdg_positioner` anchor semantics.
+fn anchor_fraction(anchor: PopupAnchor) -> (f64, f64) {
+    match anchor {
+        PopupAnchor::Center => (0.5, 0.5),
+        PopupAnchor::Top => (0.5, 0.0),
+        PopupAnchor::Bottom => (0.5, 1.0),
+        PopupAnchor::Left => (0.0, 0.5),
+        PopupAnchor::Right => (1.0, 0.5),
+        PopupAnchor::TopLeft => (0.0, 0.0),
+        PopupAnchor::BottomLeft => (0.0, 1.0),
+        PopupAnchor::TopRight => (1.0, 0.0),
+        PopupAnchor::BottomRight => (1.0, 1.0),
+    }
+}
+
+/// Returns, as fractions of the popup's own width/height, the offset from the anchor point to
+/// the popup's origin (top-left corner). For example a gravity of `BottomRight` places the
+/// popup's top-left corner at the anchor point, so the popup grows down and to the right.
+fn gravity_fraction(gravity: PopupGravity) -> (f64, f64) {
+    match gravity {
+        PopupGravity::Center => (-0.5, -0.5),
+        PopupGravity::Top => (-0.5, -1.0),
+        PopupGravity::Bottom => (-0.5, 0.0),
+        PopupGravity::Left => (-1.0, -0.5),
+        PopupGravity::Right => (0.0, -0.5),
+        PopupGravity::TopLeft => (-1.0, -1.0),
+        PopupGravity::BottomLeft => (-1.0, 0.0),
+        PopupGravity::TopRight => (0.0, -1.0),
+        PopupGravity::BottomRight => (0.0, 0.0),
+    }
+}
+
+/// Adjusts a single axis of the popup's placement to stay within `[clip_min, clip_max]`, applying
+/// `flip`/`slide`/`resize` in the order the `xdg_positioner` protocol suggests: flip, then slide,
+/// then resize. `flipped_origin` is the alternate origin obtained by mirroring both the anchor
+/// edge and the gravity on this axis; it is only used when `flip` is set and it actually results
+/// in a better fit than the original origin.
+fn constrain_axis(
+    origin: f64,
+    extent: f64,
+    clip_min: f64,
+    clip_max: f64,
+    flipped_origin: f64,
+    flip: bool,
+    slide: bool,
+    resize: bool,
+) -> (f64, f64) {
+    let fits = |o: f64| o >= clip_min && o + extent <= clip_max;
+
+    let mut origin = origin;
+    if !fits(origin) && flip && fits(flipped_origin) {
+        origin = flipped_origin;
+    }
+
+    if !fits(origin) && slide {
+        // `extent` may exceed the clip size, in which case `clip_max - extent` would be less
+        // than `clip_min`; `.max(clip_min)` keeps the clamp range valid in that case.
+        let slide_max = (clip_max - extent).max(clip_min);
+        origin = origin.clamp(clip_min, slide_max);
+    }
+
+    let mut extent = extent;
+    if resize && !fits(origin) {
+        let clamped_origin = origin.max(clip_min);
+        extent = (clip_max - clamped_origin).max(0.0);
+        origin = clamped_origin;
+    }
+
+    (origin, extent)
+}
+
+/// Finds a placement for a popup of `popup_size`, anchored to a rectangle `anchor` (in the same
+/// coordinate space as `clip`), nudged by `offset` (the user-facing offset from the anchor point,
+/// set via [`Popup::set_positioner_offset`] -- not part of the anchor rectangle's geometry), and
+/// constrained to stay within the `clip` rectangle according to `constraint_adjustment`.
+///
+/// This mirrors the Wayland `xdg_positioner` placement algorithm used natively on Wayland, for
+/// backends (such as Win32 and AppKit) that have no equivalent native concept and therefore need
+/// to compute the popup position themselves: `anchor`'s selects a point on the anchor rectangle,
+/// `gravity` decides which corner/edge of the popup is placed at that point, and if the resulting
+/// rectangle doesn't fit inside the clip rectangle, `constraint_adjustment`'s flags decide whether
+/// (and how) the popup is moved (slide), mirrored to the other side of the anchor point (flip),
+/// or shrunk (resize) to fit. Axes are adjusted independently. If none of the flags are set for an
+/// axis, that axis is left as computed even if it doesn't fit, matching the protocol's "none"
+/// behavior.
+pub fn place_popup(
+    anchor: PopupAnchor,
+    gravity: PopupGravity,
+    constraint_adjustment: PopupConstraintAdjustment,
+    (anchor_position, anchor_size): (LogicalPosition<f64>, LogicalSize<f64>),
+    offset: LogicalPosition<f64>,
+    popup_size: LogicalSize<f64>,
+    (clip_position, clip_size): (LogicalPosition<f64>, LogicalSize<f64>),
+) -> (LogicalPosition<f64>, LogicalSize<f64>) {
+    let (anchor_fx, anchor_fy) = anchor_fraction(anchor);
+    let (gravity_fx, gravity_fy) = gravity_fraction(gravity);
+
+    let anchor_point_x = anchor_position.x + anchor_size.width * anchor_fx;
+    let anchor_point_y = anchor_position.y + anchor_size.height * anchor_fy;
+
+    let origin_x = anchor_point_x + popup_size.width * gravity_fx + offset.x;
+    let origin_y = anchor_point_y + popup_size.height * gravity_fy + offset.y;
+
+    // Flipping mirrors both the anchor edge and the gravity on that axis, effectively placing the
+    // popup on the opposite side of the anchor rectangle.
+    let flipped_anchor_point_x = anchor_position.x + anchor_size.width * (1.0 - anchor_fx);
+    let flipped_anchor_point_y = anchor_position.y + anchor_size.height * (1.0 - anchor_fy);
+    let flipped_x = flipped_anchor_point_x + popup_size.width * (-1.0 - gravity_fx) + offset.x;
+    let flipped_y = flipped_anchor_point_y + popup_size.height * (-1.0 - gravity_fy) + offset.y;
+
+    let clip_min_x = clip_position.x;
+    let clip_max_x = clip_position.x + clip_size.width;
+    let clip_min_y = clip_position.y;
+    let clip_max_y = clip_position.y + clip_size.height;
+
+    let (x, width) = constrain_axis(
+        origin_x,
+        popup_size.width,
+        clip_min_x,
+        clip_max_x,
+        flipped_x,
+        constraint_adjustment.contains(PopupConstraintAdjustment::FLIP_X),
+        constraint_adjustment.contains(PopupConstraintAdjustment::SLIDE_X),
+        constraint_adjustment.contains(PopupConstraintAdjustment::RESIZE_X),
+    );
+    let (y, height) = constrain_axis(
+        origin_y,
+        popup_size.height,
+        clip_min_y,
+        clip_max_y,
+        flipped_y,
+        constraint_adjustment.contains(PopupConstraintAdjustment::FLIP_Y),
+        constraint_adjustment.contains(PopupConstraintAdjustment::SLIDE_Y),
+        constraint_adjustment.contains(PopupConstraintAdjustment::RESIZE_Y),
+    );
+
+    (LogicalPosition::new(x, y), LogicalSize::new(width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_place_popup_gravity() {
+        // A 20x10 anchor rect at (100, 100), popup size 40x30, no constraints applied
+        // (unclipped).
+        let anchor_position = LogicalPosition::new(100., 100.);
+        let anchor_size = LogicalSize::new(20., 10.);
+        let popup_size = LogicalSize::new(40., 30.);
+        let clip_position = LogicalPosition::new(0., 0.);
+        let clip_size = LogicalSize::new(0., 0.);
+
+        let place = |anchor: PopupAnchor, gravity: PopupGravity| {
+            place_popup(
+                anchor,
+                gravity,
+                PopupConstraintAdjustment::empty(),
+                (anchor_position, anchor_size),
+                LogicalPosition::new(0., 0.),
+                popup_size,
+                (clip_position, clip_size),
+            )
+        };
+
+        // BottomRight gravity anchored to the anchor's bottom-right corner: the popup's top-left
+        // corner sits exactly at the anchor rect's bottom-right corner.
+        let (origin, size) = place(PopupAnchor::BottomRight, PopupGravity::BottomRight);
+        assert_eq!(origin, LogicalPosition::new(120., 110.));
+        assert_eq!(size, popup_size);
+
+        // TopLeft gravity anchored to the anchor's top-left corner: the popup's bottom-right
+        // corner sits exactly at the anchor rect's top-left corner, so the popup extends
+        // up-left.
+        let (origin, _) = place(PopupAnchor::TopLeft, PopupGravity::TopLeft);
+        assert_eq!(origin, LogicalPosition::new(100. - 40., 100. - 30.));
+
+        // Bottom anchor + Bottom gravity: horizontally centered on the anchor, growing downward
+        // from its bottom edge.
+        let (origin, _) = place(PopupAnchor::Bottom, PopupGravity::Bottom);
+        assert_eq!(
+            origin,
+            LogicalPosition::new(
+                100. + anchor_size.width / 2. - popup_size.width / 2.,
+                110.
+            )
+        );
+
+        // Center anchor + Center gravity centers the popup exactly on the anchor rect's center.
+        let (origin, _) = place(PopupAnchor::Center, PopupGravity::Center);
+        let anchor_center = LogicalPosition::new(
+            100. + anchor_size.width / 2.,
+            100. + anchor_size.height / 2.,
+        );
+        assert_eq!(
+            origin,
+            LogicalPosition::new(
+                anchor_center.x - popup_size.width / 2.,
+                anchor_center.y - popup_size.height / 2.
+            )
+        );
+    }
+
+    #[test]
+    fn test_place_popup_flip() {
+        // Anchor rect hugging the right edge of a 300x300 clip region; with BottomRight gravity
+        // the popup would overflow past the right edge, so flipping should place it to the left
+        // instead.
+        let clip_position = LogicalPosition::new(0., 0.);
+        let clip_size = LogicalSize::new(300., 300.);
+        let anchor_position = LogicalPosition::new(280., 100.);
+        let anchor_size = LogicalSize::new(10., 10.);
+        let popup_size = LogicalSize::new(50., 50.);
+
+        let flip_only =
+            PopupConstraintAdjustment::FLIP_X | PopupConstraintAdjustment::FLIP_Y;
+
+        // Without flipping the popup would start at x=290 and end at x=340, past the clip's
+        // right edge (300); flipping mirrors both anchor edge and gravity, so it should end up
+        // entirely to the left of the anchor rect instead, fully inside the clip region.
+        let (origin, size) = place_popup(
+            PopupAnchor::TopRight,
+            PopupGravity::BottomRight,
+            flip_only,
+            (anchor_position, anchor_size),
+            LogicalPosition::new(0., 0.),
+            popup_size,
+            (clip_position, clip_size),
+        );
+        assert!(origin.x >= 0. && origin.x + size.width <= 300.);
+        assert_eq!(size, popup_size);
+        // Flipped horizontally: popup's right edge lands on the anchor rect's left edge
+        // (x=280).
+        assert_eq!(origin.x, 280. - popup_size.width);
+        // Not flipped vertically: still grows down from the anchor's top edge.
+        assert_eq!(origin.y, 100.);
+    }
+
+    #[test]
+    fn test_place_popup_slide() {
+        // Anchor near the bottom-right corner of the clip region; sliding (without flipping)
+        // should shift the popup back into view while keeping its size and general placement
+        // direction.
+        let clip_position = LogicalPosition::new(0., 0.);
+        let clip_size = LogicalSize::new(300., 300.);
+        let anchor_position = LogicalPosition::new(280., 280.);
+        let popup_size = LogicalSize::new(50., 50.);
+
+        let slide_only =
+            PopupConstraintAdjustment::SLIDE_X | PopupConstraintAdjustment::SLIDE_Y;
+
+        let (origin, size) = place_popup(
+            PopupAnchor::BottomRight,
+            PopupGravity::BottomRight,
+            slide_only,
+            (anchor_position, LogicalSize::new(0., 0.)),
+            LogicalPosition::new(0., 0.),
+            popup_size,
+            (clip_position, clip_size),
+        );
+        assert_eq!(size, popup_size);
+        assert_eq!(origin, LogicalPosition::new(250., 250.));
+    }
+
+    #[test]
+    fn test_place_popup_resize() {
+        // Popup larger than the clip region on both axes; with only `resize` enabled it should
+        // be shrunk (and clamped) to exactly fill the clip region rather than sliding or
+        // flipping.
+        let clip_position = LogicalPosition::new(0., 0.);
+        let clip_size = LogicalSize::new(300., 300.);
+        let anchor_position = LogicalPosition::new(0., 0.);
+        let popup_size = LogicalSize::new(500., 500.);
+
+        let resize_only =
+            PopupConstraintAdjustment::RESIZE_X | PopupConstraintAdjustment::RESIZE_Y;
+
+        let (origin, size) = place_popup(
+            PopupAnchor::TopLeft,
+            PopupGravity::BottomRight,
+            resize_only,
+            (anchor_position, LogicalSize::new(0., 0.)),
+            LogicalPosition::new(0., 0.),
+            popup_size,
+            (clip_position, clip_size),
+        );
+        assert_eq!(origin, clip_position);
+        assert_eq!(size, clip_size);
+    }
+
+    #[test]
+    fn test_place_popup_no_adjustment() {
+        // With no constraint-adjustment flags set, an overflowing popup is left exactly where
+        // the anchor/gravity math puts it, matching the `xdg_positioner` "none" behavior.
+        let clip_position = LogicalPosition::new(0., 0.);
+        let clip_size = LogicalSize::new(100., 100.);
+        let anchor_position = LogicalPosition::new(90., 90.);
+        let popup_size = LogicalSize::new(50., 50.);
+
+        let (origin, size) = place_popup(
+            PopupAnchor::TopLeft,
+            PopupGravity::BottomRight,
+            PopupConstraintAdjustment::empty(),
+            (anchor_position, LogicalSize::new(0., 0.)),
+            LogicalPosition::new(0., 0.),
+            popup_size,
+            (clip_position, clip_size),
+        );
+        assert_eq!(origin, anchor_position);
+        assert_eq!(size, popup_size);
+    }
+
+    #[test]
+    fn test_place_popup_all_adjustment_no_op_when_fits() {
+        // Sanity check: when the popup already fits, none of the adjustment flags should move
+        // or resize it, regardless of which are enabled.
+        let clip_position = LogicalPosition::new(0., 0.);
+        let clip_size = LogicalSize::new(300., 300.);
+        let anchor_position = LogicalPosition::new(100., 100.);
+        let popup_size = LogicalSize::new(50., 50.);
+
+        let (origin, size) = place_popup(
+            PopupAnchor::TopLeft,
+            PopupGravity::BottomRight,
+            PopupConstraintAdjustment::all(),
+            (anchor_position, LogicalSize::new(0., 0.)),
+            LogicalPosition::new(0., 0.),
+            popup_size,
+            (clip_position, clip_size),
+        );
+        assert_eq!(origin, anchor_position);
+        assert_eq!(size, popup_size);
+    }
 }

@@ -7,7 +7,9 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::{io, panic, ptr};
 
-use dpi::{PhysicalInsets, PhysicalPosition, PhysicalSize, Position, Size};
+use dpi::{
+    LogicalPosition, LogicalSize, PhysicalInsets, PhysicalPosition, PhysicalSize, Position, Size,
+};
 use tracing::warn;
 use windows_sys::Win32::Foundation::{
     HWND, LPARAM, OLE_E_WRONGCOMPOBJ, POINT, POINTS, RECT, RPC_E_CHANGED_MODE, S_OK, WPARAM,
@@ -51,6 +53,9 @@ use winit_core::cursor::Cursor;
 use winit_core::error::{NotSupportedError, RequestError};
 use winit_core::icon::{Icon, RgbaIcon};
 use winit_core::monitor::{Fullscreen, MonitorHandle as CoreMonitorHandle, MonitorHandleProvider};
+use winit_core::popup::{
+    Popup as CorePopup, PopupAnchor, PopupConstraintAdjustment, PopupGravity, place_popup,
+};
 use winit_core::window::{
     CursorGrabMode, ImeCapabilities, ImeRequest, ImeRequestError, ResizeDirection, Theme,
     UserAttentionType, Window as CoreWindow, WindowAttributes, WindowButtons, WindowId,
@@ -101,8 +106,8 @@ pub struct Window {
     // The events loop proxy.
     thread_executor: event_loop::EventLoopThreadExecutor,
 
-    /// The type of window of this
-    window_type: WindowType,
+    /// The type of window of this, including the popup positioner state for popups.
+    window_type: Mutex<WindowType>,
 }
 
 impl Window {
@@ -114,7 +119,9 @@ impl Window {
         // First person to remove the need for cloning here gets a cookie!
         //
         // done. you owe me -- ossi
-        unsafe { init(w_attr, &event_loop.0) }
+        let window = unsafe { init(w_attr, &event_loop.0) }?;
+        window.reposition_popup();
+        Ok(window)
     }
 
     fn window_state_lock(&self) -> MutexGuard<'_, WindowState> {
@@ -162,6 +169,77 @@ impl Window {
         }
 
         PhysicalPosition::new(point.x, point.y)
+    }
+
+    /// Recomputes this popup's position (and, if constrained, its size) from its positioner
+    /// state, using [`winit_core::popup::place_popup`], and applies the result. No-op if this
+    /// window isn't a popup, or if it has no parent (which the Win32 backend never allows for a
+    /// popup, see `init`).
+    fn reposition_popup(&self) {
+        let (anchor, gravity, constraint_adjustment, anchor_rect, positioner_offset) = {
+            let window_type = self.window_type.lock().unwrap();
+            let WindowType::Popup { anchor, anchor_rect, positioner_offset, gravity, constraint_adjustment } =
+                &*window_type
+            else {
+                return;
+            };
+
+            (
+                anchor.unwrap_or_default(),
+                gravity.unwrap_or_default(),
+                constraint_adjustment.unwrap_or_default(),
+                anchor_rect.unwrap_or((
+                    Position::Logical(LogicalPosition::new(0.0, 0.0)),
+                    Size::Logical(LogicalSize::new(1.0, 1.0)),
+                )),
+                positioner_offset.unwrap_or(Position::Logical(LogicalPosition::new(0.0, 0.0))),
+            )
+        };
+
+        let parent = unsafe { GetParent(self.hwnd()) };
+        if parent.is_null() {
+            return;
+        }
+
+        let monitor = monitor::current_monitor(self.hwnd());
+        let Some(monitor_position) = monitor.position() else { return };
+        let monitor_size = monitor.size();
+
+        // The anchor rect's position is relative to the parent's content area (see
+        // `Popup::set_anchor_rect`), and `set_outer_position` re-adds the parent's screen origin
+        // for popups (see `translate_outer_position`). To stay in the same coordinate space, the
+        // clip region also needs to be expressed relative to the parent's content area.
+        let mut parent_origin = POINT { x: 0, y: 0 };
+        unsafe { ClientToScreen(parent, &mut parent_origin) };
+
+        let scale_factor = self.scale_factor();
+        let clip_position = PhysicalPosition::new(
+            monitor_position.x - parent_origin.x,
+            monitor_position.y - parent_origin.y,
+        )
+        .to_logical::<f64>(scale_factor);
+        let clip_size = monitor_size.to_logical::<f64>(scale_factor);
+
+        let (anchor_position, anchor_size) = anchor_rect;
+        let anchor_position = anchor_position.to_logical::<f64>(scale_factor);
+        let anchor_size = anchor_size.to_logical::<f64>(scale_factor);
+        let offset = positioner_offset.to_logical::<f64>(scale_factor);
+        let popup_size = self.outer_size().to_logical::<f64>(scale_factor);
+
+        let (origin, size) = place_popup(
+            anchor,
+            gravity,
+            constraint_adjustment,
+            (anchor_position, anchor_size),
+            offset,
+            popup_size,
+            (clip_position, clip_size),
+        );
+
+        self.set_outer_position(Position::Logical(origin));
+        if size != popup_size {
+            let _ = self.request_surface_size(Size::Logical(size));
+        }
     }
 
     /// Returns the `hwnd` of this window.
@@ -463,7 +541,7 @@ impl rwh_06::HasWindowHandle for Window {
 
 impl CoreWindow for Window {
     fn window_type(&self) -> WindowType {
-        self.window_type.clone()
+        self.window_type.lock().unwrap().clone()
     }
 
     fn set_title(&self, text: &str) {
@@ -1213,6 +1291,67 @@ impl CoreWindow for Window {
     }
 }
 
+impl CorePopup for Window {
+    fn anchor_rect(&self) -> Option<(impl Into<Position>, impl Into<Size>)> {
+        let window_type = self.window_type.lock().unwrap();
+        if let WindowType::Popup { anchor_rect: Some((position, size)), .. } = &*window_type {
+            Some((*position, *size))
+        } else {
+            None
+        }
+    }
+
+    fn set_anchor(&self, anchor: PopupAnchor) {
+        {
+            let mut window_type = self.window_type.lock().unwrap();
+            if let WindowType::Popup { anchor: stored, .. } = &mut *window_type {
+                *stored = Some(anchor);
+            }
+        }
+        self.reposition_popup();
+    }
+
+    fn set_anchor_rect(&self, position: impl Into<Position>, size: impl Into<Size>) {
+        {
+            let mut window_type = self.window_type.lock().unwrap();
+            if let WindowType::Popup { anchor_rect, .. } = &mut *window_type {
+                *anchor_rect = Some((position.into(), size.into()));
+            }
+        }
+        self.reposition_popup();
+    }
+
+    fn set_constraint_adjustment(&self, constraint_adjustment: PopupConstraintAdjustment) {
+        {
+            let mut window_type = self.window_type.lock().unwrap();
+            if let WindowType::Popup { constraint_adjustment: stored, .. } = &mut *window_type {
+                *stored = Some(constraint_adjustment);
+            }
+        }
+        self.reposition_popup();
+    }
+
+    fn set_gravity(&self, gravity: PopupGravity) {
+        {
+            let mut window_type = self.window_type.lock().unwrap();
+            if let WindowType::Popup { gravity: stored, .. } = &mut *window_type {
+                *stored = Some(gravity);
+            }
+        }
+        self.reposition_popup();
+    }
+
+    fn set_positioner_offset(&self, position: impl Into<Position>) {
+        {
+            let mut window_type = self.window_type.lock().unwrap();
+            if let WindowType::Popup { positioner_offset, .. } = &mut *window_type {
+                *positioner_offset = Some(position.into());
+            }
+        }
+        self.reposition_popup();
+    }
+}
+
 pub(super) struct InitData<'a> {
     // inputs
     pub runner: &'a Rc<EventLoopRunner>,
@@ -1264,7 +1403,7 @@ impl InitData<'_> {
             window: SyncWindowHandle(window),
             window_state,
             thread_executor: self.runner.create_thread_executor(),
-            window_type: self.attributes.window_type,
+            window_type: Mutex::new(self.attributes.window_type.clone()),
         }
     }
 
@@ -1423,7 +1562,7 @@ unsafe fn init(
     let class_name = util::encode_wide(&win_attributes.class_name);
     unsafe { register_window_class(&class_name) };
 
-    let is_popup = matches!(attributes.window_type, WindowType::Popup);
+    let is_popup = matches!(attributes.window_type, WindowType::Popup { .. });
     let mut window_flags = WindowFlags::empty();
     window_flags.set(WindowFlags::MARKER_DECORATIONS, attributes.decorations);
     window_flags.set(WindowFlags::POPUP, is_popup);
