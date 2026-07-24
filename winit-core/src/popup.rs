@@ -18,7 +18,7 @@ use crate::as_any::AsAny;
 #[non_exhaustive]
 pub enum PopupAnchor {
     #[default]
-    None,
+    Center,
     Top,
     Bottom,
     Left,
@@ -35,7 +35,7 @@ pub enum PopupAnchor {
 #[non_exhaustive]
 pub enum PopupGravity {
     #[default]
-    None,
+    Center,
     Top,
     Bottom,
     Left,

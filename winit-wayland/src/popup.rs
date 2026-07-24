@@ -797,7 +797,7 @@ fn from_gravity(
 ) -> wayland_protocols::xdg::shell::client::xdg_positioner::Gravity {
     use wayland_protocols::xdg::shell::client::xdg_positioner::Gravity;
     match gravity {
-        PopupGravity::None => Gravity::None,
+        PopupGravity::Center => Gravity::None,
         PopupGravity::Top => Gravity::Top,
         PopupGravity::Bottom => Gravity::Bottom,
         PopupGravity::Left => Gravity::Left,
@@ -815,7 +815,7 @@ fn from_anchor(
 ) -> wayland_protocols::xdg::shell::client::xdg_positioner::Anchor {
     use wayland_protocols::xdg::shell::client::xdg_positioner::Anchor;
     match value {
-        PopupAnchor::None => Anchor::None,
+        PopupAnchor::Center => Anchor::None,
         PopupAnchor::Top => Anchor::Top,
         PopupAnchor::Bottom => Anchor::Bottom,
         PopupAnchor::Left => Anchor::Left,
