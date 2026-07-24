@@ -99,7 +99,7 @@ impl rwh_06::HasWindowHandle for Window {
 
 impl CoreWindow for Window {
     fn window_type(&self) -> WindowType {
-        self.window_type
+        self.window_type.clone()
     }
 
     fn id(&self) -> winit_core::window::WindowId {
