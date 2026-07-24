@@ -65,8 +65,7 @@ pub enum WindowType {
     ///   [`WindowAttributes::with_transparent`]) and render the round border yourself.
     /// - **X11, Web, Android, iOS, Orbital:** An error is returned because it is not implemented.
     Popup {
-        /// Sets the edge or corner of the parent window of the anchor rectangle the popup is
-        /// attached to.
+        /// Sets the edge or corner of the anchor rect used to position the popup relative to it
         ///
         /// Combined with [`gravity`](Self::gravity), this controls which corner/edge of
         /// the anchor rectangle the popup is pinned to.

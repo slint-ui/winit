@@ -236,6 +236,71 @@ pub fn place_popup(
 mod tests {
     use super::*;
 
+    const GRID_COLS: usize = 60;
+    const GRID_ROWS: usize = 24;
+
+    /// Prints an ASCII rendering of the clip region (`.`), the anchor rect (`A`), and the
+    /// resulting popup rect (`P`, `X` where it overlaps the anchor) for a quick visual sanity
+    /// check. Run with `cargo test -p winit-core popup -- --nocapture` to see it.
+    fn draw(
+        label: &str,
+        clip: (LogicalPosition<f64>, LogicalSize<f64>),
+        anchor: (LogicalPosition<f64>, LogicalSize<f64>),
+        popup: (LogicalPosition<f64>, LogicalSize<f64>),
+    ) {
+        let (clip_position, clip_size) = clip;
+        let (anchor_position, anchor_size) = anchor;
+        let (popup_position, popup_size) = popup;
+        let has_clip = clip_size.width > 0.0 && clip_size.height > 0.0;
+
+        // Bounding box covering everything we're about to draw, plus a small margin.
+        let mut min_x = anchor_position.x.min(popup_position.x);
+        let mut min_y = anchor_position.y.min(popup_position.y);
+        let mut max_x = (anchor_position.x + anchor_size.width).max(popup_position.x + popup_size.width);
+        let mut max_y = (anchor_position.y + anchor_size.height).max(popup_position.y + popup_size.height);
+        if has_clip {
+            min_x = min_x.min(clip_position.x);
+            min_y = min_y.min(clip_position.y);
+            max_x = max_x.max(clip_position.x + clip_size.width);
+            max_y = max_y.max(clip_position.y + clip_size.height);
+        }
+        let margin_x = ((max_x - min_x) * 0.1).max(1.0);
+        let margin_y = ((max_y - min_y) * 0.1).max(1.0);
+        min_x -= margin_x;
+        min_y -= margin_y;
+        max_x += margin_x;
+        max_y += margin_y;
+
+        // Terminal characters are roughly twice as tall as they are wide, so use half the
+        // vertical scale to keep the rendered rectangles' proportions roughly correct.
+        let scale = (GRID_COLS as f64 / (max_x - min_x)).min(2.0 * GRID_ROWS as f64 / (max_y - min_y));
+
+        let mut grid = vec![vec![' '; GRID_COLS]; GRID_ROWS];
+        let mut plot = |position: LogicalPosition<f64>, size: LogicalSize<f64>, ch: char| {
+            let x0 = ((position.x - min_x) * scale).round() as isize;
+            let y0 = ((position.y - min_y) * scale / 2.0).round() as isize;
+            let x1 = ((position.x + size.width - min_x) * scale).round() as isize;
+            let y1 = ((position.y + size.height - min_y) * scale / 2.0).round() as isize;
+            for y in y0.max(0)..y1.min(GRID_ROWS as isize) {
+                for x in x0.max(0)..x1.min(GRID_COLS as isize) {
+                    let cell = &mut grid[y as usize][x as usize];
+                    *cell = if *cell == ' ' || *cell == ch { ch } else { 'X' };
+                }
+            }
+        };
+
+        if has_clip {
+            plot(clip_position, clip_size, '.');
+        }
+        plot(anchor_position, anchor_size, 'A');
+        plot(popup_position, popup_size, 'P');
+
+        println!("--- {label} (A = anchor, P = popup, X = overlap, . = clip region) ---");
+        for row in grid {
+            println!("{}", row.into_iter().collect::<String>());
+        }
+    }
+
     #[test]
     fn test_place_popup_gravity() {
         // A 20x10 anchor rect at (100, 100), popup size 40x30, no constraints applied
@@ -261,18 +326,36 @@ mod tests {
         // BottomRight gravity anchored to the anchor's bottom-right corner: the popup's top-left
         // corner sits exactly at the anchor rect's bottom-right corner.
         let (origin, size) = place(PopupAnchor::BottomRight, PopupGravity::BottomRight);
+        draw(
+            "gravity: BottomRight anchor + BottomRight gravity",
+            (clip_position, clip_size),
+            (anchor_position, anchor_size),
+            (origin, size),
+        );
         assert_eq!(origin, LogicalPosition::new(120., 110.));
         assert_eq!(size, popup_size);
 
         // TopLeft gravity anchored to the anchor's top-left corner: the popup's bottom-right
         // corner sits exactly at the anchor rect's top-left corner, so the popup extends
         // up-left.
-        let (origin, _) = place(PopupAnchor::TopLeft, PopupGravity::TopLeft);
+        let (origin, size) = place(PopupAnchor::TopLeft, PopupGravity::TopLeft);
+        draw(
+            "gravity: TopLeft anchor + TopLeft gravity",
+            (clip_position, clip_size),
+            (anchor_position, anchor_size),
+            (origin, size),
+        );
         assert_eq!(origin, LogicalPosition::new(100. - 40., 100. - 30.));
 
         // Bottom anchor + Bottom gravity: horizontally centered on the anchor, growing downward
         // from its bottom edge.
-        let (origin, _) = place(PopupAnchor::Bottom, PopupGravity::Bottom);
+        let (origin, size) = place(PopupAnchor::Bottom, PopupGravity::Bottom);
+        draw(
+            "gravity: Bottom anchor + Bottom gravity",
+            (clip_position, clip_size),
+            (anchor_position, anchor_size),
+            (origin, size),
+        );
         assert_eq!(
             origin,
             LogicalPosition::new(
@@ -282,7 +365,13 @@ mod tests {
         );
 
         // Center anchor + Center gravity centers the popup exactly on the anchor rect's center.
-        let (origin, _) = place(PopupAnchor::Center, PopupGravity::Center);
+        let (origin, size) = place(PopupAnchor::Center, PopupGravity::Center);
+        draw(
+            "gravity: Center anchor + Center gravity",
+            (clip_position, clip_size),
+            (anchor_position, anchor_size),
+            (origin, size),
+        );
         let anchor_center = LogicalPosition::new(
             100. + anchor_size.width / 2.,
             100. + anchor_size.height / 2.,
@@ -322,6 +411,12 @@ mod tests {
             popup_size,
             (clip_position, clip_size),
         );
+        draw(
+            "flip",
+            (clip_position, clip_size),
+            (anchor_position, anchor_size),
+            (origin, size),
+        );
         assert!(origin.x >= 0. && origin.x + size.width <= 300.);
         assert_eq!(size, popup_size);
         // Flipped horizontally: popup's right edge lands on the anchor rect's left edge
@@ -353,6 +448,12 @@ mod tests {
             popup_size,
             (clip_position, clip_size),
         );
+        draw(
+            "slide",
+            (clip_position, clip_size),
+            (anchor_position, LogicalSize::new(0., 0.)),
+            (origin, size),
+        );
         assert_eq!(size, popup_size);
         assert_eq!(origin, LogicalPosition::new(250., 250.));
     }
@@ -379,6 +480,12 @@ mod tests {
             popup_size,
             (clip_position, clip_size),
         );
+        draw(
+            "resize",
+            (clip_position, clip_size),
+            (anchor_position, LogicalSize::new(0., 0.)),
+            (origin, size),
+        );
         assert_eq!(origin, clip_position);
         assert_eq!(size, clip_size);
     }
@@ -401,6 +508,12 @@ mod tests {
             popup_size,
             (clip_position, clip_size),
         );
+        draw(
+            "no adjustment",
+            (clip_position, clip_size),
+            (anchor_position, LogicalSize::new(0., 0.)),
+            (origin, size),
+        );
         assert_eq!(origin, anchor_position);
         assert_eq!(size, popup_size);
     }
@@ -422,6 +535,12 @@ mod tests {
             LogicalPosition::new(0., 0.),
             popup_size,
             (clip_position, clip_size),
+        );
+        draw(
+            "all adjustment, already fits",
+            (clip_position, clip_size),
+            (anchor_position, LogicalSize::new(0., 0.)),
+            (origin, size),
         );
         assert_eq!(origin, anchor_position);
         assert_eq!(size, popup_size);
