@@ -178,8 +178,13 @@ impl Window {
     fn reposition_popup(&self) {
         let (anchor, gravity, constraint_adjustment, anchor_rect, positioner_offset) = {
             let window_type = self.window_type.lock().unwrap();
-            let WindowType::Popup { anchor, anchor_rect, positioner_offset, gravity, constraint_adjustment } =
-                &*window_type
+            let WindowType::Popup {
+                anchor,
+                anchor_rect,
+                positioner_offset,
+                gravity,
+                constraint_adjustment,
+            } = &*window_type
             else {
                 return;
             };
@@ -1296,7 +1301,7 @@ impl CoreWindow for Window {
 }
 
 impl CorePopup for Window {
-    fn anchor_rect(&self) -> Option<(impl Into<Position>, impl Into<Size>)> {
+    fn anchor_rect(&self) -> Option<(Position, Size)> {
         let window_type = self.window_type.lock().unwrap();
         if let WindowType::Popup { anchor_rect: Some((position, size)), .. } = &*window_type {
             Some((*position, *size))
@@ -1315,7 +1320,7 @@ impl CorePopup for Window {
         self.reposition_popup();
     }
 
-    fn set_anchor_rect(&self, position: impl Into<Position>, size: impl Into<Size>) {
+    fn set_anchor_rect(&self, position: Position, size: Size) {
         {
             let mut window_type = self.window_type.lock().unwrap();
             if let WindowType::Popup { anchor_rect, .. } = &mut *window_type {
@@ -1345,7 +1350,7 @@ impl CorePopup for Window {
         self.reposition_popup();
     }
 
-    fn set_positioner_offset(&self, position: impl Into<Position>) {
+    fn set_positioner_offset(&self, position: Position) {
         {
             let mut window_type = self.window_type.lock().unwrap();
             if let WindowType::Popup { positioner_offset, .. } = &mut *window_type {
