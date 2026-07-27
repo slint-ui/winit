@@ -318,6 +318,10 @@ impl CoreWindow for Popup {
         }
     }
 
+    fn as_popup(&self) -> Option<&dyn CorePopup> {
+        Some(self)
+    }
+
     fn id(&self) -> WindowId {
         self.window_id
     }
@@ -713,24 +717,24 @@ impl CorePopup for Popup {
         }
     }
 
-    fn anchor_rect(&self) -> Option<(impl Into<Position>, impl Into<Size>)> {
+    fn anchor_rect(&self) -> Option<(Position, Size)> {
         let state = self.popup_state.upgrade()?;
         if let WindowType::Popup { anchor_rect, .. } = &state.lock().unwrap().window {
-            Some(*anchor_rect)
+            Some((anchor_rect.0.into(), anchor_rect.1.into()))
         } else {
             None
         }
     }
 
-    fn set_anchor_rect(&self, position: impl Into<Position>, size: impl Into<Size>) {
+    fn set_anchor_rect(&self, position: Position, size: Size) {
         let Some(state) = self.popup_state.upgrade() else {
             return;
         };
 
         let mut state = state.lock().unwrap();
         let scale_factor = state.scale_factor();
-        let size: LogicalSize<i32> = size.into().to_logical(scale_factor);
-        let position: LogicalPosition<i32> = position.into().to_logical(scale_factor);
+        let size: LogicalSize<i32> = size.to_logical(scale_factor);
+        let position: LogicalPosition<i32> = position.to_logical(scale_factor);
 
         if let WindowType::Popup { popup, positioner, parent_origin, anchor_rect, .. } =
             &mut state.window
@@ -746,17 +750,18 @@ impl CorePopup for Popup {
         }
     }
 
-    fn set_positioner_offset(&self, position: impl Into<Position>) {
+    fn set_positioner_offset(&self, position: Position) {
         let Some(state) = self.popup_state.upgrade() else {
             return;
         };
 
         let scale_factor = state.lock().unwrap().scale_factor();
-        let position: LogicalPosition<i32> = position.into().to_logical(scale_factor);
         if let WindowType::Popup { popup, positioner, positioner_offset, .. } =
             &mut state.lock().unwrap().window
         {
             *positioner_offset = Some(position.into());
+
+            let position: LogicalPosition<i32> = position.to_logical(scale_factor);
             positioner.set_offset(position.x, position.y);
             popup.reposition(positioner, 0);
         }

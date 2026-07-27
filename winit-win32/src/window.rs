@@ -544,6 +544,10 @@ impl CoreWindow for Window {
         self.window_type.lock().unwrap().clone()
     }
 
+    fn as_popup(&self) -> Option<&dyn CorePopup> {
+        matches!(self.window_type(), WindowType::Popup { .. }).then_some(self)
+    }
+
     fn set_title(&self, text: &str) {
         let wide_text = util::encode_wide(text);
         unsafe {

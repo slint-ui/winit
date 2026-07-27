@@ -14,7 +14,7 @@ use crate::cursor::Cursor;
 use crate::error::RequestError;
 use crate::icon::Icon;
 use crate::monitor::{Fullscreen, MonitorHandle};
-use crate::popup::{PopupAnchor, PopupConstraintAdjustment, PopupGravity};
+use crate::popup::{Popup, PopupAnchor, PopupConstraintAdjustment, PopupGravity};
 
 /// Identifier of a window. Unique for each window.
 ///
@@ -566,6 +566,16 @@ impl_dyn_casting!(PlatformWindowAttributes);
 pub trait Window: AsAny + Send + Sync + fmt::Debug {
     /// Returns the window type of this window
     fn window_type(&self) -> WindowType;
+
+    /// Returns this window as a [`Popup`] if the window is a Popup, otherwise None
+    ///
+    /// Distinct implementation for:
+	/// - **Wayland**
+	/// - **Windows**
+	/// - **macOs**
+    fn as_popup(&self) -> Option<&dyn Popup> {
+        None
+    }
 
     /// Returns an identifier unique to the window.
     fn id(&self) -> WindowId;

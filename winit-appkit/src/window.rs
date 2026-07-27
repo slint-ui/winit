@@ -179,6 +179,10 @@ impl CoreWindow for Window {
         self.window_type.lock().unwrap().clone()
     }
 
+    fn as_popup(&self) -> Option<&dyn CorePopup> {
+        matches!(self.window_type(), WindowType::Popup { .. }).then_some(self)
+    }
+
     fn id(&self) -> winit_core::window::WindowId {
         self.maybe_wait_on_main(|delegate| delegate.id())
     }

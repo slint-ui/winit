@@ -12,6 +12,8 @@ use dpi::{LogicalPosition, LogicalSize, Position, Size};
 
 use crate::as_any::AsAny;
 
+impl_dyn_casting!(Popup);
+
 /// Anchor rect within the parent surface
 /// See: https://wayland.app/protocols/xdg-shell#xdg_positioner:request:set_anchor_rect
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -63,7 +65,7 @@ bitflags::bitflags! {
 
 /// Represents a popup window
 pub trait Popup: AsAny + Send + Sync + fmt::Debug {
-    fn anchor_rect(&self) -> Option<(impl Into<Position>, impl Into<Size>)>;
+    fn anchor_rect(&self) -> Option<(Position, Size)>;
 
     /// Sets the anchor edge of the parent surface the popup is positioned relative to.
     ///
@@ -74,7 +76,7 @@ pub trait Popup: AsAny + Send + Sync + fmt::Debug {
     ///
     /// `position` is the top-left corner of the rectangle relative to the parent window's content
     /// area, and `size` its dimensions.
-    fn set_anchor_rect(&self, position: impl Into<Position>, size: impl Into<Size>);
+    fn set_anchor_rect(&self, position: Position, size: Size);
 
     /// Sets how the compositor should reposition the popup when it would be constrained by screen
     /// edges.
@@ -88,7 +90,7 @@ pub trait Popup: AsAny + Send + Sync + fmt::Debug {
     fn set_gravity(&self, gravity: PopupGravity);
 
     /// Set the popup position relative to the anchor rect
-    fn set_positioner_offset(&self, position: impl Into<Position>);
+    fn set_positioner_offset(&self, position: Position);
 }
 
 /// Returns, as fractions of the anchor rectangle's width/height, the point within that rectangle
