@@ -39,3 +39,9 @@ The migration guide could reference other migration examples in the current
 changelog entry.
 
 ## Unreleased
+
+### Changed
+
+- Removed the `url` dependency from `winit-core`, along with `SendData::from_file_paths`,
+  `TypedData::try_as_file_paths` and `impl From<Vec<url::Url>> for SendData`. Use `SendData::Uris`
+  / `TypedData::try_as_uris` with `file:` URIs instead.
